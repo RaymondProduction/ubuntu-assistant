@@ -2,263 +2,234 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import shutil
 import subprocess
 import time
 from collections import deque
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import gi
 
-gi.require_version("Gdk", "3.0")
-gi.require_version("GdkPixbuf", "2.0")
-gi.require_version("Gtk", "3.0")
+gi.require_version('Gdk', '3.0')
+gi.require_version('GdkPixbuf', '2.0')
+gi.require_version('Gtk', '3.0')
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-APP_NAME = "Native Clippy"
+APP_NAME = 'Office Assistant Clone'
 BASE_DIR = Path(__file__).resolve().parent
-ASSETS_DIR = BASE_DIR / "assets"
-AGENT_JSON = ASSETS_DIR / "clippy_agent.json"
-MAP_PNG = ASSETS_DIR / "clippy_map.png"
-SOUNDS_DIR = ASSETS_DIR / "sounds"
-CLIPPY_SOUNDS_DIR = SOUNDS_DIR / "clippy"
-WATCH_DIRS = [Path.home() / name for name in ("Desktop", "Downloads", "Documents")]
+ASSETS_DIR = BASE_DIR / 'assets'
+AGENTS_DIR = ASSETS_DIR / 'agents'
+WATCH_DIRS = [Path.home() / name for name in ('Desktop', 'Downloads', 'Documents')]
 WINDOW_SCALE = 1.55
 IDLE_SECONDS = 10.0
 MAX_RECENT_AGE_SECONDS = 60.0
 
-EVENT_ANIMATIONS: dict[str, list[str]] = {
-    "created_dir": ["GetAttention", "Searching", "Explain"],
-    "created_file": ["Writing", "GetAttention", "Save"],
-    "modified": ["Processing", "Writing", "Thinking"],
-    "deleted": ["EmptyTrash", "GetArtsy", "LookDown"],
-    "moved": ["Searching", "GestureLeft", "GestureRight"],
-    "opened": ["Greeting", "GetAttention", "Explain"],
-    "idle": ["Idle1_1", "IdleAtom", "LookUp", "LookRight", "RestPose"],
+RETRO_CSS = b'''
+window.office-window {
+    background: #c0c0c0;
+    border: 2px solid #7f7f7f;
 }
 
-EVENT_SOUNDS: dict[str, str] = {
-    "created_dir": "folder-created",
-    "created_file": "file-created",
-    "modified": "file-modified",
-    "deleted": "file-deleted",
-    "moved": "file-moved",
-    "opened": "file-opened",
-    "idle": "idle",
+#office-root {
+    background: #c0c0c0;
 }
 
-FALLBACK_SOUND_THEMES: dict[str, tuple[str, ...]] = {
-    "folder-created": ("complete", "dialog-information", "service-login"),
-    "file-created": ("complete", "dialog-information", "service-login"),
-    "file-modified": ("message", "dialog-information", "bell"),
-    "file-deleted": ("trash-empty", "dialog-warning", "bell"),
-    "file-moved": ("window-attention", "dialog-information", "bell"),
-    "file-opened": ("button-pressed", "dialog-information", "bell"),
-    "idle": ("bell", "dialog-information"),
+#title-bar {
+    background: #008080;
+    color: white;
+    padding: 3px 6px;
 }
 
-EVENT_MESSAGES: dict[str, list[str]] = {
-    "created_dir": [
-        "A new folder appeared.",
-        "Looks like you created a new folder.",
-    ],
-    "created_file": [
-        "A new file just showed up.",
-        "I noticed a freshly created file.",
-    ],
-    "modified": [
-        "Something was updated.",
-        "That file changed just now.",
-    ],
-    "deleted": [
-        "Something disappeared.",
-        "That file was removed.",
-    ],
-    "moved": [
-        "I saw a file move.",
-        "That item changed its location.",
-    ],
-    "opened": [
-        "That file was opened recently.",
-        "I noticed a recently opened file.",
-    ],
-    "idle": [
-        "I'm keeping an eye on your files.",
-        "Nothing new yet. I'm still here.",
-    ],
-}
-
-TRANSPARENT_CSS = b"""
-#clippy-window,
-#clippy-window box,
-#clippy-window overlay,
-#clippy-window eventbox {
-    background-color: transparent;
-    background-image: none;
-    box-shadow: none;
-    border: none;
-}
-#bubble {
-    background: rgba(18, 18, 18, 0.78);
-    border-radius: 14px;
-    padding: 8px 12px;
-}
-#bubble label {
-    color: #ffffff;
-}
-#control-window {
-    background: #17181c;
-}
-#control-root {
-    background: #17181c;
-}
-#section-card {
-    background: #23252b;
-    border: 1px solid #32353d;
-    border-radius: 14px;
-    padding: 14px;
-}
-#section-title {
-    color: #f4f6fb;
+#title-bar label {
+    color: white;
     font-weight: 700;
 }
-#section-subtitle {
-    color: #aeb4c0;
-}
-#control-window button {
-    background: #30343d;
-    background-image: none;
-    border: 1px solid #4a505c;
-    border-radius: 10px;
-    color: #f6f8ff;
+
+.win95-button {
+    background: #c0c0c0;
+    color: black;
+    border-top: 2px solid #ffffff;
+    border-left: 2px solid #ffffff;
+    border-right: 2px solid #404040;
+    border-bottom: 2px solid #404040;
+    border-radius: 0;
+    padding: 4px 8px;
     box-shadow: none;
-    padding: 8px 10px;
 }
-#control-window button:hover {
-    background: #3a3f49;
+
+.win95-button:active {
+    border-top: 2px solid #404040;
+    border-left: 2px solid #404040;
+    border-right: 2px solid #ffffff;
+    border-bottom: 2px solid #ffffff;
 }
-#control-window button:active {
-    background: #464c57;
+
+#panel-sunken {
+    background: #c0c0c0;
+    border-top: 2px solid #808080;
+    border-left: 2px solid #808080;
+    border-right: 2px solid #ffffff;
+    border-bottom: 2px solid #ffffff;
+    padding: 8px;
 }
-#control-window button label,
-#control-window label,
-#control-window combobox,
-#control-window combobox box,
-#control-window combobox box label {
-    color: #f6f8ff;
+
+#panel-raised {
+    background: #c0c0c0;
+    border-top: 2px solid #ffffff;
+    border-left: 2px solid #ffffff;
+    border-right: 2px solid #808080;
+    border-bottom: 2px solid #808080;
+    padding: 8px;
 }
-#control-window combobox,
-#control-window combobox box {
-    background: #22252b;
-    background-image: none;
-    border: 1px solid #4a505c;
-    border-radius: 10px;
-    padding: 6px 8px;
+
+#gallery-preview {
+    background: white;
+    border-top: 2px solid #808080;
+    border-left: 2px solid #808080;
+    border-right: 2px solid #ffffff;
+    border-bottom: 2px solid #ffffff;
 }
-#control-window separator {
-    background: #32353d;
+
+#retro-notebook tab {
+    background: #c0c0c0;
+    border-top: 2px solid #ffffff;
+    border-left: 2px solid #ffffff;
+    border-right: 2px solid #808080;
+    border-bottom: none;
+    padding: 4px 10px;
 }
-"""
+
+#retro-notebook tab:checked {
+    background: #c0c0c0;
+}
+
+#retro-notebook stack {
+    background: #c0c0c0;
+}
+
+#speech-label {
+    color: black;
+    font: 14px sans;
+}
+
+#bubble-caption {
+    color: #202020;
+}
+
+combobox, entry {
+    background: white;
+    color: black;
+    border-top: 2px solid #808080;
+    border-left: 2px solid #808080;
+    border-right: 2px solid #ffffff;
+    border-bottom: 2px solid #ffffff;
+    border-radius: 0;
+}
+'''
+
+AGENT_LIBRARY: list[dict[str, str]] = [
+    {
+        'id': 'clippy',
+        'folder': 'clippy',
+        'name': 'Clippit',
+        'description': 'The classic paperclip assistant who keeps everything together.',
+    },
+    {
+        'id': 'dog',
+        'folder': 'rover',
+        'name': 'Dog',
+        'description': 'A cheerful dog assistant who reacts with playful curiosity.',
+    },
+    {
+        'id': 'merlin',
+        'folder': 'merlin',
+        'name': 'Merlin',
+        'description': 'A wizard assistant for moments that need a little magic.',
+    },
+    {
+        'id': 'genius',
+        'folder': 'genius',
+        'name': 'Genius',
+        'description': 'A scholarly helper with a thoughtful, bookish look.',
+    },
+]
+
+EVENT_MESSAGES: dict[str, list[str]] = {
+    'created_dir': ['A new folder appeared.', 'You created a new folder.'],
+    'created_file': ['A new file just showed up.', 'A fresh file was created.'],
+    'modified': ['Something was updated.', 'That file changed just now.'],
+    'deleted': ['Something disappeared.', 'That file was removed.'],
+    'moved': ['I saw a file move.', 'That item changed its location.'],
+    'opened': ['That file was opened recently.', 'I noticed a recently opened file.'],
+    'idle': ["I'm keeping an eye on your files.", "Nothing new yet. I'm still here."],
+}
+
+EVENT_ANIMATIONS_DEFAULT: dict[str, list[str]] = {
+    'created_dir': ['GetAttention', 'Searching', 'Explain'],
+    'created_file': ['Writing', 'GetAttention', 'Save'],
+    'modified': ['Processing', 'Writing', 'Thinking'],
+    'deleted': ['EmptyTrash', 'GetArtsy', 'LookDown'],
+    'moved': ['Searching', 'GestureLeft', 'GestureRight'],
+    'opened': ['Greeting', 'GetAttention', 'Explain'],
+    'idle': ['Idle1_1', 'IdleAtom', 'LookUp', 'LookRight', 'RestPose'],
+}
 
 
-def install_css() -> None:
-    provider = Gtk.CssProvider()
-    provider.load_from_data(TRANSPARENT_CSS)
-    screen = Gdk.Screen.get_default()
-    if screen is not None:
-        Gtk.StyleContext.add_provider_for_screen(
-            screen,
-            provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
-        )
+@dataclass(slots=True)
+class AgentMeta:
+    agent_id: str
+    folder: str
+    name: str
+    description: str
 
-
-def clamp_text(text: str, limit: int = 90) -> str:
-    text = " ".join(text.split())
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+    @property
+    def path(self) -> Path:
+        return AGENTS_DIR / self.folder
 
 
 class SoundPlayer:
-    def __init__(self, sounds_dir: Path, clippy_sounds_dir: Path) -> None:
-        self.sounds_dir = sounds_dir
-        self.clippy_sounds_dir = clippy_sounds_dir
-        self.canberra = shutil.which("canberra-gtk-play")
-        self.paplay = shutil.which("paplay")
-        self.aplay = shutil.which("aplay")
+    def __init__(self) -> None:
+        self.canberra = shutil.which('canberra-gtk-play')
+        self.paplay = shutil.which('paplay')
+        self.aplay = shutil.which('aplay')
+        self.sounds_dir: Path | None = None
 
-    def play_event(self, event_type: str) -> None:
-        sound_key = EVENT_SOUNDS.get(event_type)
-        if not sound_key:
-            return
-        custom_sound = self._find_custom_sound(sound_key)
-        if custom_sound is not None:
-            self._spawn_file_player(custom_sound)
-            return
-        self._play_fallback_theme(sound_key)
+    def set_agent_dir(self, sounds_dir: Path) -> None:
+        self.sounds_dir = sounds_dir
 
     def play_sound_id(self, sound_id: str | int | None) -> None:
-        if sound_id is None:
+        if sound_id is None or self.sounds_dir is None:
             return
-        sound_path = self._find_clippy_sound(str(sound_id))
-        if sound_path is not None:
-            self._spawn_file_player(sound_path)
-
-    def _find_custom_sound(self, sound_key: str) -> Path | None:
-        for ext in (".wav", ".ogg", ".oga", ".mp3"):
-            candidate = self.sounds_dir / f"{sound_key}{ext}"
+        base = str(sound_id)
+        sound_path = None
+        for ext in ('.ogg', '.oga', '.wav', '.mp3'):
+            candidate = self.sounds_dir / f'{base}{ext}'
             if candidate.exists():
-                return candidate
-        return None
+                sound_path = candidate
+                break
+        if sound_path is None:
+            return
+        self._spawn_file(sound_path)
 
-    def _find_clippy_sound(self, sound_id: str) -> Path | None:
-        for ext in (".ogg", ".oga", ".wav", ".mp3"):
-            candidate = self.clippy_sounds_dir / f"{sound_id}{ext}"
-            if candidate.exists():
-                return candidate
-        return None
-
-    def _spawn_file_player(self, sound_path: Path) -> None:
+    def _spawn_file(self, sound_path: Path) -> None:
         cmd = None
         suffix = sound_path.suffix.lower()
-        if self.paplay and suffix in {".wav", ".ogg", ".oga"}:
+        if self.paplay and suffix in {'.ogg', '.oga', '.wav'}:
             cmd = [self.paplay, str(sound_path)]
-        elif self.aplay and suffix == ".wav":
+        elif self.aplay and suffix == '.wav':
             cmd = [self.aplay, str(sound_path)]
         elif self.canberra:
-            cmd = [self.canberra, "-f", str(sound_path)]
+            cmd = [self.canberra, '-f', str(sound_path)]
         if cmd is None:
-            self._system_beep()
             return
-        self._spawn(cmd)
-
-    def _play_fallback_theme(self, sound_key: str) -> None:
-        names = FALLBACK_SOUND_THEMES.get(sound_key, ())
-        if self.canberra:
-            for name in names:
-                if self._spawn([self.canberra, "-i", name]):
-                    return
-        self._system_beep()
-
-    def _spawn(self, cmd: list[str]) -> bool:
         try:
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return True
-        except Exception:
-            return False
-
-    def _system_beep(self) -> None:
-        try:
-            display = Gdk.Display.get_default()
-            if display is not None:
-                display.beep()
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
 
@@ -266,8 +237,8 @@ class SoundPlayer:
 class AgentData:
     def __init__(self, json_path: Path, map_path: Path) -> None:
         self.data = json.loads(json_path.read_text())
-        self.animations: dict[str, dict[str, Any]] = self.data["animations"]
-        self.frame_width, self.frame_height = self.data["framesize"]
+        self.animations: dict[str, dict[str, Any]] = self.data['animations']
+        self.frame_width, self.frame_height = self.data['framesize']
         self.sprite = GdkPixbuf.Pixbuf.new_from_file(str(map_path))
 
     def get_frame_pixbuf(self, x: int, y: int, scale: float) -> GdkPixbuf.Pixbuf:
@@ -280,26 +251,34 @@ class AgentData:
             GdkPixbuf.InterpType.BILINEAR,
         )
 
-    def animation_has_embedded_sound(self, name: str) -> bool:
-        anim = self.animations.get(name, {})
-        for frame in anim.get("frames", []):
-            if "sound" in frame:
-                return True
-        return False
+    def get_preview_pixbuf(self, scale: float = 1.1) -> GdkPixbuf.Pixbuf:
+        rest = self.animations.get('RestPose') or next(iter(self.animations.values()))
+        frame = (rest.get('frames') or [{'images': [[0, 0]]}])[0]
+        x, y = (frame.get('images') or [[0, 0]])[0]
+        return self.get_frame_pixbuf(x, y, scale)
+
+    def has_animation(self, name: str) -> bool:
+        return name in self.animations
+
+    def list_animations(self) -> list[str]:
+        return sorted(self.animations.keys())
 
 
 class SpriteAnimator:
-    def __init__(self, image: Gtk.Image, agent: AgentData, on_done, on_sound) -> None:
+    def __init__(self, image: Gtk.Image, on_done, on_sound) -> None:
         self.image = image
-        self.agent = agent
         self.on_done = on_done
         self.on_sound = on_sound
+        self.agent: AgentData | None = None
         self.timer_id: int | None = None
-        self.active_animation = "RestPose"
+        self.active_animation = 'RestPose'
         self.active_frames: list[dict[str, Any]] = []
         self.frame_index = 0
         self.scale = WINDOW_SCALE
-        self.set_animation("RestPose")
+
+    def set_agent(self, agent: AgentData) -> None:
+        self.agent = agent
+        self.set_animation('RestPose')
 
     def cancel(self) -> None:
         if self.timer_id is not None:
@@ -307,25 +286,26 @@ class SpriteAnimator:
             self.timer_id = None
 
     def set_animation(self, name: str) -> None:
+        if self.agent is None:
+            return
         self.cancel()
-        if name not in self.agent.animations:
-            name = "RestPose"
+        if not self.agent.has_animation(name):
+            name = 'RestPose' if self.agent.has_animation('RestPose') else self.agent.list_animations()[0]
         self.active_animation = name
-        self.active_frames = self.agent.animations[name].get("frames", [])
+        self.active_frames = self.agent.animations[name].get('frames', [])
         self.frame_index = 0
         self._show_current_frame()
 
     def _show_current_frame(self) -> None:
-        if not self.active_frames:
+        if not self.agent or not self.active_frames:
             return
         frame = self.active_frames[self.frame_index]
-        if "sound" in frame:
-            self.on_sound(frame.get("sound"))
-        images = frame.get("images") or [[0, 0]]
-        x, y = images[0]
+        if 'sound' in frame:
+            self.on_sound(frame.get('sound'))
+        x, y = (frame.get('images') or [[0, 0]])[0]
         pixbuf = self.agent.get_frame_pixbuf(x, y, self.scale)
         self.image.set_from_pixbuf(pixbuf)
-        duration = max(int(frame.get("duration", 100)), 30)
+        duration = max(int(frame.get('duration', 100)), 30)
         self.timer_id = GLib.timeout_add(duration, self._advance)
 
     def _advance(self) -> bool:
@@ -344,132 +324,350 @@ class EventBridge(FileSystemEventHandler):
         self.callback = callback
 
     def on_created(self, event):
-        self.callback("created_dir" if event.is_directory else "created_file", event.src_path)
+        self.callback('created_dir' if event.is_directory else 'created_file', event.src_path)
 
     def on_modified(self, event):
         if not event.is_directory:
-            self.callback("modified", event.src_path)
+            self.callback('modified', event.src_path)
 
     def on_deleted(self, event):
-        self.callback("deleted", event.src_path)
+        self.callback('deleted', event.src_path)
 
     def on_moved(self, event):
-        self.callback("moved", getattr(event, "dest_path", event.src_path))
+        self.callback('moved', getattr(event, 'dest_path', event.src_path))
 
 
-class ControlWindow(Gtk.Window):
-    def __init__(self, owner: "ClippyWindow") -> None:
-        super().__init__(title="Clippy Actions")
+class OfficeBubble(Gtk.Overlay):
+    def __init__(self) -> None:
+        super().__init__()
+        self.set_size_request(360, 130)
+        self.bg = Gtk.DrawingArea()
+        self.bg.connect('draw', self._on_draw)
+        self.add(self.bg)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.set_margin_top(18)
+        box.set_margin_bottom(26)
+        box.set_margin_start(26)
+        box.set_margin_end(28)
+        self.add_overlay(box)
+
+        self.label = Gtk.Label(label='')
+        self.label.set_name('speech-label')
+        self.label.set_xalign(0.0)
+        self.label.set_yalign(0.0)
+        self.label.set_line_wrap(True)
+        self.label.set_max_width_chars(38)
+        box.pack_start(self.label, True, True, 0)
+
+    def set_text(self, text: str) -> None:
+        self.label.set_text(text)
+
+    def _on_draw(self, _widget, cr):
+        alloc = self.get_allocation()
+        w = alloc.width
+        h = alloc.height
+        radius = 14.0
+        tail_x = 68.0
+        tail_y = h - 26.0
+        # filled bubble
+        cr.set_source_rgb(1.0, 0.968, 0.78)
+        self._rounded_rect(cr, 6.0, 6.0, w - 12.0, h - 34.0, radius)
+        cr.fill_preserve()
+        cr.move_to(tail_x - 12, tail_y)
+        cr.line_to(tail_x + 4, h - 2)
+        cr.line_to(tail_x + 18, tail_y - 2)
+        cr.close_path()
+        cr.fill()
+        # outline
+        cr.set_source_rgb(0, 0, 0)
+        cr.set_line_width(2.0)
+        self._rounded_rect(cr, 6.0, 6.0, w - 12.0, h - 34.0, radius)
+        cr.stroke()
+        cr.move_to(tail_x - 12, tail_y)
+        cr.line_to(tail_x + 4, h - 2)
+        cr.line_to(tail_x + 18, tail_y - 2)
+        cr.close_path()
+        cr.stroke()
+        return False
+
+    @staticmethod
+    def _rounded_rect(cr, x, y, w, h, r):
+        cr.new_sub_path()
+        cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+        cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+        cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+        cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+        cr.close_path()
+
+
+class OfficeActionsWindow(Gtk.Window):
+    def __init__(self, owner: 'AssistantWindow') -> None:
+        super().__init__(title='Office Assistant')
         self.owner = owner
-        self.set_name("control-window")
-        self.set_default_size(440, 420)
+        self.preview_index = owner.current_agent_index
+        self.preview_agents = owner.agent_metas
+        self.preview_cache: dict[str, AgentData] = {}
+        self.set_default_size(780, 520)
         self.set_resizable(False)
-        self.set_keep_above(True)
-        self.set_type_hint(Gdk.WindowTypeHint.UTILITY)
-        self.set_position(Gtk.WindowPosition.CENTER_ALWAYS)
+        self.set_decorated(False)
+        self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
+        self.connect('button-press-event', self._on_drag)
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
 
-        header = Gtk.HeaderBar()
-        header.set_show_close_button(True)
-        header.props.title = "Clippy Actions"
-        header.props.subtitle = "Double-click Clippy to open this window"
-        self.set_titlebar(header)
-
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        root.set_name("control-root")
-        root.set_border_width(16)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        root.set_name('office-root')
         self.add(root)
 
-        actions_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        actions_card.set_name("section-card")
-        root.pack_start(actions_card, False, False, 0)
+        titlebar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        titlebar.set_name('title-bar')
+        titlebar.set_margin_bottom(4)
+        root.pack_start(titlebar, False, False, 0)
 
-        title = Gtk.Label()
-        title.set_name("section-title")
-        title.set_markup("<span size='large' weight='bold'>Manual actions</span>")
+        title = Gtk.Label(label='Office Assistant')
         title.set_xalign(0.0)
-        actions_card.pack_start(title, False, False, 0)
+        titlebar.pack_start(title, True, True, 6)
 
-        subtitle = Gtk.Label(label="Trigger file-related reactions yourself.")
-        subtitle.set_name("section-subtitle")
-        subtitle.set_xalign(0.0)
-        actions_card.pack_start(subtitle, False, False, 0)
+        help_btn = self._win95_button('?')
+        help_btn.set_size_request(28, 24)
+        help_btn.connect('clicked', lambda *_: self.owner.set_speech('Tip: pick an assistant in Gallery, then click OK.'))
+        titlebar.pack_start(help_btn, False, False, 0)
 
-        events_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
-        actions_card.pack_start(events_grid, False, False, 0)
+        close_btn = self._win95_button('×')
+        close_btn.set_size_request(28, 24)
+        close_btn.connect('clicked', lambda *_: self.hide())
+        titlebar.pack_start(close_btn, False, False, 4)
 
-        event_buttons = [
-            ("New file", "created_file", "manual-file.txt"),
-            ("New folder", "created_dir", "Manual Folder"),
-            ("Modified", "modified", "manual-edit.txt"),
-            ("Deleted", "deleted", "manual-delete.txt"),
-            ("Moved", "moved", "manual-moved.txt"),
-            ("Opened", "opened", "manual-open.txt"),
-            ("Idle", "idle", ""),
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        outer.set_margin_start(10)
+        outer.set_margin_end(10)
+        outer.set_margin_top(6)
+        outer.set_margin_bottom(10)
+        root.pack_start(outer, True, True, 0)
+
+        notebook = Gtk.Notebook()
+        notebook.set_name('retro-notebook')
+        outer.pack_start(notebook, True, True, 0)
+
+        actions_page = self._build_actions_page()
+        notebook.append_page(actions_page, Gtk.Label(label='Actions'))
+
+        gallery_page = self._build_gallery_page()
+        notebook.append_page(gallery_page, Gtk.Label(label='Gallery'))
+
+        bottom = Gtk.Box(spacing=8)
+        outer.pack_end(bottom, False, False, 0)
+        bottom.pack_start(Gtk.Box(), True, True, 0)
+
+        ok_btn = self._win95_button('OK')
+        ok_btn.set_size_request(120, 34)
+        ok_btn.connect('clicked', self._on_ok)
+        bottom.pack_start(ok_btn, False, False, 0)
+
+        cancel_btn = self._win95_button('Cancel')
+        cancel_btn.set_size_request(120, 34)
+        cancel_btn.connect('clicked', lambda *_: self.hide())
+        bottom.pack_start(cancel_btn, False, False, 0)
+
+        self._refresh_gallery()
+        self.show_all()
+        self.hide()
+
+    def _build_actions_page(self) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_start(10)
+        box.set_margin_end(10)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
+
+        desc = Gtk.Label(
+            label='Use the buttons below to make your assistant react right away. You can also pick a specific animation.',
+        )
+        desc.set_xalign(0.0)
+        desc.set_line_wrap(True)
+        box.pack_start(desc, False, False, 0)
+
+        panel = Gtk.Frame()
+        panel.set_name('panel-sunken')
+        box.pack_start(panel, True, True, 0)
+
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        inner.set_margin_start(10)
+        inner.set_margin_end(10)
+        inner.set_margin_top(10)
+        inner.set_margin_bottom(10)
+        panel.add(inner)
+
+        grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+        inner.pack_start(grid, False, False, 0)
+
+        manual_actions = [
+            ('New file', 'created_file'),
+            ('New folder', 'created_dir'),
+            ('Modified', 'modified'),
+            ('Deleted', 'deleted'),
+            ('Moved', 'moved'),
+            ('Opened', 'opened'),
+            ('Idle', 'idle'),
         ]
-        for idx, (label, event_type, payload) in enumerate(event_buttons):
-            btn = Gtk.Button(label=label)
-            btn.set_hexpand(True)
-            btn.connect("clicked", self._on_manual_event_clicked, event_type, payload)
-            events_grid.attach(btn, idx % 2, idx // 2, 1, 1)
+        for idx, (label, event_type) in enumerate(manual_actions):
+            btn = self._win95_button(label)
+            btn.set_size_request(150, 34)
+            btn.connect('clicked', lambda *_args, ev=event_type: self.owner.manual_event(ev))
+            grid.attach(btn, idx % 2, idx // 2, 1, 1)
 
-        animations_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        animations_card.set_name("section-card")
-        root.pack_start(animations_card, True, True, 0)
+        anim_row = Gtk.Box(spacing=8)
+        inner.pack_start(anim_row, False, False, 0)
 
-        anim_title = Gtk.Label()
-        anim_title.set_name("section-title")
-        anim_title.set_markup("<span size='large' weight='bold'>Animations</span>")
-        anim_title.set_xalign(0.0)
-        animations_card.pack_start(anim_title, False, False, 0)
+        self.anim_combo = Gtk.ComboBoxText()
+        self._reload_animation_combo()
+        anim_row.pack_start(self.anim_combo, True, True, 0)
 
-        anim_subtitle = Gtk.Label(label="Choose any built-in Clippy animation.")
-        anim_subtitle.set_name("section-subtitle")
-        anim_subtitle.set_xalign(0.0)
-        animations_card.pack_start(anim_subtitle, False, False, 0)
+        play_btn = self._win95_button('Play')
+        play_btn.set_size_request(80, 32)
+        play_btn.connect('clicked', self._on_play_animation)
+        anim_row.pack_start(play_btn, False, False, 0)
 
-        combo_row = Gtk.Box(spacing=10)
-        animations_card.pack_start(combo_row, False, False, 0)
+        rest_btn = self._win95_button('RestPose')
+        rest_btn.set_size_request(120, 32)
+        rest_btn.connect('clicked', lambda *_: self.owner.play_named_animation('RestPose'))
+        anim_row.pack_start(rest_btn, False, False, 0)
 
-        self.animation_combo = Gtk.ComboBoxText()
-        self.animation_combo.set_hexpand(True)
-        animation_names = sorted(self.owner.agent.animations.keys())
-        for name in animation_names:
-            self.animation_combo.append_text(name)
-        if animation_names:
-            default_index = animation_names.index("Greeting") if "Greeting" in animation_names else 0
-            self.animation_combo.set_active(default_index)
-        combo_row.pack_start(self.animation_combo, True, True, 0)
+        return box
 
-        play_btn = Gtk.Button(label="Play")
-        play_btn.connect("clicked", self._on_play_animation_clicked)
-        combo_row.pack_start(play_btn, False, False, 0)
+    def _build_gallery_page(self) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_start(10)
+        box.set_margin_end(10)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
 
-        rest_btn = Gtk.Button(label="Back to RestPose")
-        rest_btn.connect("clicked", self._on_restpose_clicked)
-        animations_card.pack_start(rest_btn, False, False, 0)
+        desc = Gtk.Label(
+            label='You can scroll through the different assistants by using the <Back and Next> buttons. When you are finished selecting your assistant, click the OK button.',
+        )
+        desc.set_xalign(0.0)
+        desc.set_line_wrap(True)
+        box.pack_start(desc, False, False, 0)
 
-        bottom_row = Gtk.Box(spacing=10)
-        root.pack_end(bottom_row, False, False, 0)
+        panel = Gtk.Frame()
+        panel.set_name('panel-sunken')
+        box.pack_start(panel, True, True, 0)
 
-        hide_btn = Gtk.Button(label="Hide controls")
-        hide_btn.connect("clicked", lambda *_: self.hide())
-        bottom_row.pack_end(hide_btn, False, False, 0)
+        panel_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
+        panel_box.set_margin_start(12)
+        panel_box.set_margin_end(12)
+        panel_box.set_margin_top(12)
+        panel_box.set_margin_bottom(12)
+        panel.add(panel_box)
 
-    def _on_manual_event_clicked(self, _button: Gtk.Button, event_type: str, payload: str) -> None:
-        self.owner.enqueue(event_type, payload)
+        self.preview_frame = Gtk.Frame()
+        self.preview_frame.set_name('gallery-preview')
+        self.preview_frame.set_size_request(200, 180)
+        panel_box.pack_start(self.preview_frame, False, False, 0)
 
-    def _on_play_animation_clicked(self, _button: Gtk.Button) -> None:
-        self.owner.play_manual_animation(self.animation_combo.get_active_text())
+        preview_align = Gtk.Alignment.new(0.5, 0.5, 0, 0)
+        self.preview_frame.add(preview_align)
+        self.preview_image = Gtk.Image()
+        preview_align.add(self.preview_image)
 
-    def _on_restpose_clicked(self, _button: Gtk.Button) -> None:
-        self.owner.force_restpose()
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        panel_box.pack_start(right, True, True, 0)
+
+        self.preview_bubble = OfficeBubble()
+        self.preview_bubble.set_size_request(360, 140)
+        right.pack_start(self.preview_bubble, False, False, 0)
+
+        self.preview_name = Gtk.Label()
+        self.preview_name.set_xalign(0.0)
+        self.preview_name.set_name('bubble-caption')
+        right.pack_start(self.preview_name, False, False, 0)
+
+        self.preview_desc = Gtk.Label()
+        self.preview_desc.set_xalign(0.0)
+        self.preview_desc.set_line_wrap(True)
+        right.pack_start(self.preview_desc, False, False, 0)
+
+        nav = Gtk.Box(spacing=10)
+        box.pack_start(nav, False, False, 0)
+
+        back_btn = self._win95_button('< Back')
+        back_btn.set_size_request(110, 34)
+        back_btn.connect('clicked', lambda *_: self._step_gallery(-1))
+        nav.pack_start(back_btn, False, False, 0)
+
+        next_btn = self._win95_button('Next >')
+        next_btn.set_size_request(110, 34)
+        next_btn.connect('clicked', lambda *_: self._step_gallery(1))
+        nav.pack_start(next_btn, False, False, 0)
+
+        nav.pack_start(Gtk.Box(), True, True, 0)
+        return box
+
+    def _reload_animation_combo(self) -> None:
+        self.anim_combo.remove_all()
+        for name in self.owner.agent_data.list_animations():
+            self.anim_combo.append_text(name)
+        self.anim_combo.set_active(0)
+
+    def _step_gallery(self, step: int) -> None:
+        self.preview_index = (self.preview_index + step) % len(self.preview_agents)
+        self._refresh_gallery()
+
+    def _refresh_gallery(self) -> None:
+        meta = self.preview_agents[self.preview_index]
+        data = self.preview_cache.get(meta.agent_id)
+        if data is None:
+            data = AgentData(meta.path / 'agent.json', meta.path / 'map.png')
+            self.preview_cache[meta.agent_id] = data
+        self.preview_image.set_from_pixbuf(data.get_preview_pixbuf(1.3))
+        self.preview_bubble.set_text(self._gallery_quote(meta.agent_id))
+        self.preview_name.set_text(f'Name:      {meta.name}')
+        self.preview_desc.set_text(meta.description)
+
+    def _gallery_quote(self, agent_id: str) -> str:
+        quotes = {
+            'clippy': "How's life? All work and no play?",
+            'dog': 'Want me to sniff around your files?',
+            'merlin': 'A little wizardry can brighten any workflow.',
+            'genius': 'Let us approach this with a truly brilliant plan.',
+        }
+        return quotes.get(agent_id, 'Choose the assistant you would like to use.')
+
+    def _on_play_animation(self, *_args) -> None:
+        text = self.anim_combo.get_active_text()
+        if text:
+            self.owner.play_named_animation(text)
+
+    def _on_ok(self, *_args) -> None:
+        self.owner.set_agent_by_index(self.preview_index)
+        self._reload_animation_combo()
+        self.hide()
+
+    def present_for(self, owner: 'AssistantWindow') -> None:
+        self.preview_index = owner.current_agent_index
+        self._refresh_gallery()
+        self._reload_animation_combo()
+        self.show_all()
+        self.present()
+
+    def _win95_button(self, label: str) -> Gtk.Button:
+        btn = Gtk.Button(label=label)
+        btn.get_style_context().add_class('win95-button')
+        return btn
+
+    def _on_drag(self, _widget, event):
+        if event.button == 1 and event.type == Gdk.EventType.BUTTON_PRESS:
+            try:
+                self.begin_move_drag(event.button, int(event.x_root), int(event.y_root), event.time)
+            except Exception:
+                pass
+        return False
 
 
-class ClippyWindow(Gtk.Window):
+class AssistantWindow(Gtk.Window):
     def __init__(self) -> None:
         super().__init__(title=APP_NAME)
-        self.set_name("clippy-window")
-        self.set_default_size(260, 270)
+        self.set_default_size(420, 360)
         self.set_resizable(False)
         self.set_decorated(False)
         self.set_skip_taskbar_hint(True)
@@ -485,13 +683,17 @@ class ClippyWindow(Gtk.Window):
             if visual is not None and screen.is_composited():
                 self.set_visual(visual)
 
-        self.connect("draw", self._on_window_draw)
-        self.connect("destroy", self._on_destroy)
-        self.connect("button-press-event", self._on_button_press)
+        self.connect('draw', self._on_window_draw)
+        self.connect('destroy', self._on_destroy)
+        self.connect('button-press-event', self._on_button_press)
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
 
-        self.agent = AgentData(AGENT_JSON, MAP_PNG)
-        self.sound_player = SoundPlayer(SOUNDS_DIR, CLIPPY_SOUNDS_DIR)
+        self.agent_metas = [AgentMeta(item['id'], item['folder'], item['name'], item['description']) for item in AGENT_LIBRARY]
+        self.current_agent_index = 0
+        self.agent_data = self._load_agent_data(self.agent_metas[self.current_agent_index])
+        self.sound_player = SoundPlayer()
+        self.sound_player.set_agent_dir(self.agent_metas[self.current_agent_index].path / 'sounds')
+        self.actions_window = OfficeActionsWindow(self)
         self.queue: deque[tuple[str, str]] = deque()
         self.is_busy = False
         self.last_idle = time.monotonic()
@@ -500,85 +702,67 @@ class ClippyWindow(Gtk.Window):
         self.observer: Observer | None = None
 
         root = Gtk.Overlay()
-        root.set_halign(Gtk.Align.FILL)
-        root.set_valign(Gtk.Align.FILL)
         self.add(root)
 
         drag_box = Gtk.EventBox()
         drag_box.set_visible_window(False)
         drag_box.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
-        drag_box.connect("button-press-event", self._on_button_press)
+        drag_box.connect('button-press-event', self._on_button_press)
         root.add(drag_box)
 
-        layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         layout.set_margin_top(8)
         layout.set_margin_bottom(8)
         layout.set_margin_start(8)
         layout.set_margin_end(8)
         drag_box.add(layout)
 
+        self.top_bubble = OfficeBubble()
+        self.top_bubble.set_halign(Gtk.Align.CENTER)
+        layout.pack_start(self.top_bubble, False, False, 0)
+
         self.image = Gtk.Image()
         self.image.set_halign(Gtk.Align.CENTER)
         self.image.set_valign(Gtk.Align.CENTER)
         layout.pack_start(self.image, True, True, 0)
 
-        self.bubble_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        self.bubble_box.set_name("bubble")
-        self.bubble_box.set_halign(Gtk.Align.CENTER)
-        self.bubble_box.set_valign(Gtk.Align.END)
-        root.add_overlay(self.bubble_box)
-        self.bubble_box.set_margin_bottom(12)
-
-        self.message = Gtk.Label(label="Native Clippy is watching your folders.")
-        self.message.set_line_wrap(True)
-        self.message.set_justify(Gtk.Justification.CENTER)
-        self.message.set_max_width_chars(28)
-        self.message.set_width_chars(28)
-        self.bubble_box.pack_start(self.message, True, True, 0)
-
-        self.control_window: ControlWindow | None = None
-
-        self.animator = SpriteAnimator(self.image, self.agent, self._on_animation_finished, self.sound_player.play_sound_id)
+        self.animator = SpriteAnimator(self.image, self._on_animation_finished, self.sound_player.play_sound_id)
+        self.animator.set_agent(self.agent_data)
 
         self.show_all()
+        self._set_intro_speech()
         self._start_watchdog()
         self._start_recent_monitor()
         GLib.timeout_add_seconds(2, self._idle_tick)
-        self.enqueue("opened", "Application started")
+        self.enqueue('opened', 'Application started')
 
+    def _load_agent_data(self, meta: AgentMeta) -> AgentData:
+        return AgentData(meta.path / 'agent.json', meta.path / 'map.png')
 
-    def _on_actions_clicked(self, *_args) -> None:
-        if self.control_window is None:
-            self.control_window = ControlWindow(self)
-            self.control_window.connect("delete-event", self._on_control_delete)
-        self.control_window.show_all()
-        self.control_window.present()
-        try:
-            self.control_window.grab_focus()
-        except Exception:
-            pass
+    def set_agent_by_index(self, index: int) -> None:
+        self.current_agent_index = index
+        meta = self.agent_metas[index]
+        self.agent_data = self._load_agent_data(meta)
+        self.sound_player.set_agent_dir(meta.path / 'sounds')
+        self.animator.set_agent(self.agent_data)
+        self.set_speech(f'{meta.name} is now ready to help you.')
 
-    def _on_control_delete(self, widget, *_args):
-        widget.hide()
-        return True
+    def set_speech(self, text: str) -> None:
+        self.top_bubble.set_text(clamp_text(text, 160))
 
-    def play_manual_animation(self, animation_name: str | None) -> None:
-        if self.is_busy or not animation_name:
-            return
+    def _set_intro_speech(self) -> None:
+        meta = self.agent_metas[self.current_agent_index]
+        self.set_speech(f'{meta.name} is watching your files.')
+
+    def manual_event(self, event_type: str) -> None:
+        self.enqueue(event_type, f'Manual {event_type}')
+
+    def play_named_animation(self, name: str) -> None:
         self.queue.clear()
         self.is_busy = True
         self.last_idle = time.monotonic()
-        self.message.set_text(clamp_text(f"Manual animation\n{animation_name}", 120))
-        if not self.agent.animation_has_embedded_sound(animation_name):
-            self.sound_player.play_event("opened")
-        self.animator.set_animation(animation_name)
-        self.bubble_box.show()
-
-    def force_restpose(self) -> None:
-        self.queue.clear()
-        self.is_busy = False
-        self.animator.set_animation("RestPose")
-        self.message.set_text("RestPose")
+        self.set_speech(f'Playing animation: {name}')
+        self.animator.set_animation(name)
 
     def _on_window_draw(self, _widget, cr):
         cr.set_source_rgba(0.0, 0.0, 0.0, 0.0)
@@ -588,10 +772,12 @@ class ClippyWindow(Gtk.Window):
         return False
 
     def _on_button_press(self, _widget, event):
-        if event.button == 1 and event.type == Gdk.EventType._2BUTTON_PRESS:
-            self._on_actions_clicked()
+        if event.button != 1:
+            return False
+        if event.type == Gdk.EventType._2BUTTON_PRESS:
+            self.actions_window.present_for(self)
             return True
-        if event.type == Gdk.EventType.BUTTON_PRESS and event.button == 1:
+        if event.type == Gdk.EventType.BUTTON_PRESS:
             try:
                 self.begin_move_drag(event.button, int(event.x_root), int(event.y_root), event.time)
             except Exception:
@@ -599,20 +785,17 @@ class ClippyWindow(Gtk.Window):
         return False
 
     def _on_destroy(self, *_args) -> None:
-        if self.control_window is not None:
-            try:
-                self.control_window.destroy()
-            except Exception:
-                pass
         if self.observer is not None:
             self.observer.stop()
             self.observer.join(timeout=2)
+        if self.actions_window is not None:
+            self.actions_window.destroy()
         Gtk.main_quit()
 
     def _start_watchdog(self) -> None:
         existing = [path for path in WATCH_DIRS if path.exists()]
         if not existing:
-            self.message.set_text("No Desktop, Downloads, or Documents folders were found.")
+            self.set_speech('No Desktop, Downloads, or Documents folders were found.')
             return
         handler = EventBridge(self._watchdog_callback)
         observer = Observer()
@@ -627,7 +810,7 @@ class ClippyWindow(Gtk.Window):
 
     def _start_recent_monitor(self) -> None:
         self.recent_manager = Gtk.RecentManager.get_default()
-        self.recent_manager.connect("changed", self._on_recent_changed)
+        self.recent_manager.connect('changed', self._on_recent_changed)
 
     def _on_recent_changed(self, *_args) -> None:
         try:
@@ -647,34 +830,37 @@ class ClippyWindow(Gtk.Window):
         self.last_recent_uri = uri
         self.last_recent_seen = now
         display = item.get_display_name() or uri
-        self.enqueue("opened", display)
+        self.enqueue('opened', display)
 
     def enqueue(self, event_type: str, payload: str) -> bool:
         self.queue.append((event_type, payload))
         self._try_start_next()
         return False
 
+    def _available_event_animations(self, event_type: str) -> list[str]:
+        preferred = EVENT_ANIMATIONS_DEFAULT.get(event_type, ['RestPose'])
+        available = [name for name in preferred if self.agent_data.has_animation(name)]
+        return available or ['RestPose']
+
     def _try_start_next(self) -> None:
         if self.is_busy or not self.queue:
             return
         event_type, payload = self.queue.popleft()
-        anim = random.choice(EVENT_ANIMATIONS.get(event_type, ["RestPose"]))
-        text_options = EVENT_MESSAGES.get(event_type, ["Something happened."])
+        anim = random.choice(self._available_event_animations(event_type))
+        text_options = EVENT_MESSAGES.get(event_type, ['Something happened.'])
         message = random.choice(text_options)
         name = Path(payload).name if payload else payload
         if name:
-            message = f"{message}\n{name}"
-        self.message.set_text(clamp_text(message, 120))
-        if not self.agent.animation_has_embedded_sound(anim):
-            self.sound_player.play_event(event_type)
+            message = f'{message}\n{name}'
+        self.set_speech(message)
         self.is_busy = True
         self.last_idle = time.monotonic()
         self.animator.set_animation(anim)
-        self.bubble_box.show()
 
     def _on_animation_finished(self, _animation_name: str) -> None:
         self.is_busy = False
-        self.animator.set_animation("RestPose")
+        if self.agent_data.has_animation('RestPose'):
+            self.animator.set_animation('RestPose')
         GLib.timeout_add(50, self._continue_queue)
 
     def _continue_queue(self) -> bool:
@@ -683,16 +869,30 @@ class ClippyWindow(Gtk.Window):
 
     def _idle_tick(self) -> bool:
         if not self.is_busy and not self.queue and (time.monotonic() - self.last_idle) >= IDLE_SECONDS:
-            self.enqueue("idle", "")
+            self.enqueue('idle', '')
         return True
+
+
+def clamp_text(text: str, limit: int = 120) -> str:
+    text = ' '.join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + '…'
+
+
+def install_css() -> None:
+    provider = Gtk.CssProvider()
+    provider.load_from_data(RETRO_CSS)
+    screen = Gdk.Screen.get_default()
+    if screen is not None:
+        Gtk.StyleContext.add_provider_for_screen(screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
 
 def main() -> None:
     install_css()
-    win = ClippyWindow()
+    win = AssistantWindow()
+    win.get_style_context().add_class('office-window')
     win.present()
     Gtk.main()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
