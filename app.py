@@ -545,44 +545,72 @@ class TrayIndicator:
     def __init__(self, owner: 'AssistantWindow') -> None:
         self.owner = owner
         self.indicator = None
+
         if AppIndicator3 is None:
+            print("[Tray] AppIndicator3 is not available")
             return
+
         try:
-            self.indicator = AppIndicator3.Indicator.new(
-                'office-assistant-clone',
-                'applications-system',
+            icon_dir = str(ASSETS_DIR.resolve())
+            icon_name = "clippy_tray_icon"
+
+            indicator = AppIndicator3.Indicator.new(
+                "clippy-assistant",
+                icon_name,
                 AppIndicator3.IndicatorCategory.APPLICATION_STATUS,
             )
-            self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
-            self.indicator.set_title(APP_NAME)
-            self.indicator.set_menu(self._build_menu())
-        except Exception:
-            self.indicator = None
+            indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+            indicator.set_title(APP_NAME)
+            indicator.set_icon_theme_path(icon_dir)
+            indicator.set_icon_full(icon_name, "Clippy")
 
-    def _build_menu(self) -> Gtk.Menu:
+            self.indicator = indicator
+            self.indicator.set_menu(self.build_menu())
+
+        except Exception as e:
+            print(f"[Tray] failed to init indicator: {e}")
+
+    def build_menu(self) -> Gtk.Menu:
         menu = Gtk.Menu()
 
-        toggle_item = Gtk.MenuItem(label='Show / Hide Assistant')
-        toggle_item.connect('activate', lambda *_: self.owner.toggle_visibility())
-        menu.append(toggle_item)
+        show_item = Gtk.MenuItem(label="Show / Hide Assistant")
+        show_item.connect("activate", self._on_toggle_visibility)
+        menu.append(show_item)
 
-        actions_item = Gtk.MenuItem(label='Open Office Assistant')
-        actions_item.connect('activate', lambda *_: self.owner.actions_window.present_for(self.owner))
-        menu.append(actions_item)
+        office_item = Gtk.MenuItem(label="Open Office Assistant")
+        office_item.connect("activate", self._on_open_actions)
+        menu.append(office_item)
 
-        rest_item = Gtk.MenuItem(label='RestPose')
-        rest_item.connect('activate', lambda *_: self.owner.play_named_animation('RestPose'))
+        rest_item = Gtk.MenuItem(label="RestPose")
+        rest_item.connect("activate", self._on_restpose)
         menu.append(rest_item)
 
-        menu.append(Gtk.SeparatorMenuItem())
+        sep = Gtk.SeparatorMenuItem()
+        menu.append(sep)
 
-        quit_item = Gtk.MenuItem(label='Quit')
-        quit_item.connect('activate', lambda *_: self.owner.force_quit())
+        quit_item = Gtk.MenuItem(label="Quit")
+        quit_item.connect("activate", self._on_quit)
         menu.append(quit_item)
 
         menu.show_all()
         return menu
 
+    def _on_toggle_visibility(self, *_args) -> None:
+        if self.owner.is_visible():
+            self.owner.hide()
+        else:
+            self.owner.show_all()
+            self.owner.present()
+
+    def _on_open_actions(self, *_args) -> None:
+        self.owner.actions_window.show_all()
+        self.owner.actions_window.present()
+
+    def _on_restpose(self, *_args) -> None:
+        self.owner.play_named_animation("RestPose")
+
+    def _on_quit(self, *_args) -> None:
+        self.owner.destroy()
 
 class AssistantWindow(Gtk.Window):
     def __init__(self) -> None:

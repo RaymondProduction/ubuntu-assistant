@@ -36,3 +36,11 @@ python3 app.py
 ## Notes
 - Tray-based menus are intentionally avoided because GNOME/Wayland tray support is inconsistent.
 - The control window uses a custom retro UI instead of relying on your system theme.
+
+## Tray support
+
+On Ubuntu, the assistant can show an indicator in the top bar/tray if Ayatana AppIndicator is available.
+
+```bash
+sudo apt install -y gir1.2-ayatanaappindicator3-0.1 libayatana-appindicator3-1
+```
