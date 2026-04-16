@@ -1,0 +1,305 @@
+{
+  "id": "default",
+  "name": "Default",
+  "version": 1,
+  "description": "Default behavior profile for Office Assistant Clone.",
+  "settings": {
+    "idle_every_seconds": 600,
+    "global_min_gap_seconds": 12,
+    "dedupe_window_seconds": 6,
+    "randomize_weighted": true
+  },
+  "fallback_idle_animations": [
+    "LookDown",
+    "LookLeft",
+    "LookRight",
+    "Idle1_1",
+    "IdleAtom",
+    "RestPose"
+  ],
+  "signals": {
+    "ProgramStart": {
+      "enabled": true,
+      "cooldown_seconds": 1,
+      "animations": [
+        {
+          "name": "Greeting",
+          "weight": 100
+        }
+      ],
+      "speech": [
+        "Hello there.",
+        "Ready to help."
+      ]
+    },
+    "ProgramExit": {
+      "enabled": true,
+      "cooldown_seconds": 1,
+      "animations": [
+        {
+          "name": "GoodBye",
+          "weight": 100
+        }
+      ],
+      "speech": [
+        "Goodbye.",
+        "See you next time."
+      ]
+    },
+    "TypingBurst": {
+      "enabled": true,
+      "cooldown_seconds": 45,
+      "animations": [
+        {
+          "name": "Writing",
+          "weight": 60
+        },
+        {
+          "name": "CheckingSomething",
+          "weight": 40
+        }
+      ],
+      "speech": [
+        "You seem busy typing.",
+        "Working on something?",
+        "That looks like a lot of text."
+      ]
+    },
+    "CompileStarted": {
+      "enabled": true,
+      "cooldown_seconds": 60,
+      "animations": [
+        {
+          "name": "CheckingSomething",
+          "weight": 70
+        },
+        {
+          "name": "Writing",
+          "weight": 30
+        }
+      ],
+      "speech": [
+        "Compiling… let's see how it goes.",
+        "Building project."
+      ]
+    },
+    "CompileFailed": {
+      "enabled": true,
+      "cooldown_seconds": 20,
+      "animations": [
+        {
+          "name": "Wave",
+          "weight": 100
+        }
+      ],
+      "speech": [
+        "Something went wrong.",
+        "That build did not finish cleanly."
+      ]
+    },
+    "FileSaved": {
+      "enabled": true,
+      "cooldown_seconds": 20,
+      "animations": [
+        {
+          "name": "Save",
+          "weight": 50
+        },
+        {
+          "name": "Congratulate",
+          "weight": 50
+        }
+      ],
+      "speech": [
+        "Saved.",
+        "Nice, your work is stored."
+      ],
+      "filters": {
+        "ignore_temp_files": true,
+        "ignore_hidden_files": true,
+        "debounce_seconds": 6,
+        "ignore_patterns": [
+          "*.tmp",
+          "*.temp",
+          "*.swp",
+          "*.swo",
+          "*.bak",
+          "*~",
+          ".~lock.*",
+          ".goutputstream-*",
+          ".#*",
+          "*.part"
+        ]
+      }
+    },
+    "ArchiveCreated": {
+      "enabled": true,
+      "cooldown_seconds": 8,
+      "animations": [
+        {
+          "name": "Save",
+          "weight": 100
+        }
+      ],
+      "speech": [
+        "Archive created.",
+        "Packed and saved."
+      ]
+    },
+    "TrashEmptied": {
+      "enabled": true,
+      "cooldown_seconds": 20,
+      "animations": [
+        {
+          "name": "EmptyTrash",
+          "weight": 100
+        }
+      ],
+      "speech": [
+        "Trash is empty now."
+      ]
+    },
+    "LargeDeleteInEditor": {
+      "enabled": true,
+      "cooldown_seconds": 30,
+      "animations": [
+        {
+          "name": "EmptyTrash",
+          "weight": 100
+        }
+      ],
+      "speech": [
+        "That was a big cleanup."
+      ]
+    },
+    "AudioPlayingLong": {
+      "enabled": true,
+      "cooldown_seconds": 180,
+      "animations": [
+        {
+          "name": "Hearing_1",
+          "weight": 100
+        }
+      ],
+      "speech": [
+        "You are listening to something.",
+        "Music time?"
+      ]
+    },
+    "PrintJobStarted": {
+      "enabled": true,
+      "cooldown_seconds": 30,
+      "animations": [
+        {
+          "name": "Print",
+          "weight": 100
+        }
+      ],
+      "speech": [
+        "Printing started."
+      ]
+    },
+    "SystemSearch": {
+      "enabled": true,
+      "cooldown_seconds": 20,
+      "animations": [
+        {
+          "name": "Searching",
+          "weight": 100
+        }
+      ],
+      "speech": [
+        "Looking for something?"
+      ]
+    },
+    "MessageSent": {
+      "enabled": true,
+      "cooldown_seconds": 20,
+      "animations": [
+        {
+          "name": "SendMail",
+          "weight": 100
+        }
+      ],
+      "speech": [
+        "Message sent."
+      ]
+    },
+    "WaveError": {
+      "enabled": true,
+      "cooldown_seconds": 20,
+      "animations": [
+        {
+          "name": "Wave",
+          "weight": 100
+        }
+      ],
+      "speech": [
+        "Something looks wrong."
+      ]
+    },
+    "IdlePulse": {
+      "enabled": true,
+      "cooldown_seconds": 600,
+      "animations": [
+        {
+          "name": "LookLeft",
+          "weight": 20
+        },
+        {
+          "name": "LookRight",
+          "weight": 20
+        },
+        {
+          "name": "LookDown",
+          "weight": 20
+        },
+        {
+          "name": "IdleAtom",
+          "weight": 20
+        },
+        {
+          "name": "RestPose",
+          "weight": 20
+        }
+      ],
+      "speech": []
+    },
+    "FolderCreated": {
+      "enabled": true,
+      "cooldown_seconds": 10,
+      "animations": [
+        {
+          "name": "Searching",
+          "weight": 50
+        },
+        {
+          "name": "GetAttention",
+          "weight": 50
+        }
+      ],
+      "speech": [
+        "A new folder appeared.",
+        "You created a new folder."
+      ]
+    },
+    "FileOpened": {
+      "enabled": true,
+      "cooldown_seconds": 15,
+      "animations": [
+        {
+          "name": "Greeting",
+          "weight": 50
+        },
+        {
+          "name": "Explain",
+          "weight": 50
+        }
+      ],
+      "speech": [
+        "That file was opened recently.",
+        "I noticed a recently opened file."
+      ]
+    }
+  }
+}

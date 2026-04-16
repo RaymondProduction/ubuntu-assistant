@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import fnmatch
 import json
 import math
 import random
@@ -24,6 +25,7 @@ try:
     from gi.repository import AyatanaAppIndicator3 as AppIndicator3
 except (ValueError, ImportError):
     AppIndicator3 = None
+
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
@@ -31,10 +33,15 @@ APP_NAME = 'Office Assistant Clone'
 BASE_DIR = Path(__file__).resolve().parent
 ASSETS_DIR = BASE_DIR / 'assets'
 AGENTS_DIR = ASSETS_DIR / 'agents'
+PROFILES_DIR = BASE_DIR / 'profiles'
 WATCH_DIRS = [Path.home() / name for name in ('Desktop', 'Downloads', 'Documents')]
 WINDOW_SCALE = 1.55
 IDLE_SECONDS = 10.0
 MAX_RECENT_AGE_SECONDS = 60.0
+SUPPORTED_ARCHIVE_EXTENSIONS = {
+    '.zip', '.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.tar.gz', '.tar.bz2', '.tar.xz', '.zst', '.tar.zst',
+}
+DEFAULT_PROFILE_FILENAME = 'default.json'
 
 RETRO_CSS = b'''
 window.office-window {
@@ -106,7 +113,7 @@ window.office-window {
     border-bottom: 2px solid #ffffff;
 }
 #speech-label, #bubble-caption { color: black; }
-combobox, entry {
+combobox, entry, spinbutton, textview, treeview {
     background: white;
     color: black;
     border-top: 2px solid #808080;
@@ -124,25 +131,140 @@ AGENT_LIBRARY = [
     {'id': 'genius', 'folder': 'genius', 'name': 'Genius', 'description': 'A scholarly helper with a thoughtful, bookish look.'},
 ]
 
-EVENT_MESSAGES = {
-    'created_dir': ['A new folder appeared.', 'You created a new folder.'],
-    'created_file': ['A new file just showed up.', 'A fresh file was created.'],
-    'modified': ['Something was updated.', 'That file changed just now.'],
-    'deleted': ['Something disappeared.', 'That file was removed.'],
-    'moved': ['I saw a file move.', 'That item changed its location.'],
-    'opened': ['That file was opened recently.', 'I noticed a recently opened file.'],
-    'idle': ["I'm keeping an eye on your files.", "Nothing new yet. I'm still here."],
+PROFILE_TEMPLATE = {
+    'id': 'default',
+    'name': 'Default',
+    'version': 1,
+    'description': 'Default behavior profile for Office Assistant Clone.',
+    'settings': {
+        'idle_every_seconds': 600,
+        'global_min_gap_seconds': 12,
+        'dedupe_window_seconds': 6,
+        'randomize_weighted': True,
+    },
+    'fallback_idle_animations': ['LookDown', 'LookLeft', 'LookRight', 'Idle1_1', 'IdleAtom', 'RestPose'],
+    'signals': {
+        'ProgramStart': {
+            'enabled': True,
+            'cooldown_seconds': 1,
+            'animations': [{'name': 'Greeting', 'weight': 100}],
+            'speech': ['Hello there.', 'Ready to help.'],
+        },
+        'ProgramExit': {
+            'enabled': True,
+            'cooldown_seconds': 1,
+            'animations': [{'name': 'GoodBye', 'weight': 100}],
+            'speech': ['Goodbye.', 'See you next time.'],
+        },
+        'TypingBurst': {
+            'enabled': True,
+            'cooldown_seconds': 45,
+            'animations': [{'name': 'Writing', 'weight': 60}, {'name': 'CheckingSomething', 'weight': 40}],
+            'speech': ['You seem busy typing.', 'Working on something?', 'That looks like a lot of text.'],
+        },
+        'CompileStarted': {
+            'enabled': True,
+            'cooldown_seconds': 60,
+            'animations': [{'name': 'CheckingSomething', 'weight': 70}, {'name': 'Writing', 'weight': 30}],
+            'speech': ['Compiling… let\'s see how it goes.', 'Building project.'],
+        },
+        'CompileFailed': {
+            'enabled': True,
+            'cooldown_seconds': 20,
+            'animations': [{'name': 'Wave', 'weight': 100}],
+            'speech': ['Something went wrong.', 'That build did not finish cleanly.'],
+        },
+        'FileSaved': {
+            'enabled': True,
+            'cooldown_seconds': 20,
+            'animations': [{'name': 'Save', 'weight': 50}, {'name': 'Congratulate', 'weight': 50}],
+            'speech': ['Saved.', 'Nice, your work is stored.'],
+            'filters': {
+                'ignore_temp_files': True,
+                'ignore_hidden_files': True,
+                'debounce_seconds': 6,
+                'ignore_patterns': ['*.tmp', '*.temp', '*.swp', '*.swo', '*.bak', '*~', '.~lock.*', '.goutputstream-*', '.#*', '*.part'],
+            },
+        },
+        'ArchiveCreated': {
+            'enabled': True,
+            'cooldown_seconds': 8,
+            'animations': [{'name': 'Save', 'weight': 100}],
+            'speech': ['Archive created.', 'Packed and saved.'],
+        },
+        'TrashEmptied': {
+            'enabled': True,
+            'cooldown_seconds': 20,
+            'animations': [{'name': 'EmptyTrash', 'weight': 100}],
+            'speech': ['Trash is empty now.'],
+        },
+        'LargeDeleteInEditor': {
+            'enabled': True,
+            'cooldown_seconds': 30,
+            'animations': [{'name': 'EmptyTrash', 'weight': 100}],
+            'speech': ['That was a big cleanup.'],
+        },
+        'AudioPlayingLong': {
+            'enabled': True,
+            'cooldown_seconds': 180,
+            'animations': [{'name': 'Hearing_1', 'weight': 100}],
+            'speech': ['You are listening to something.', 'Music time?'],
+        },
+        'PrintJobStarted': {
+            'enabled': True,
+            'cooldown_seconds': 30,
+            'animations': [{'name': 'Print', 'weight': 100}],
+            'speech': ['Printing started.'],
+        },
+        'SystemSearch': {
+            'enabled': True,
+            'cooldown_seconds': 20,
+            'animations': [{'name': 'Searching', 'weight': 100}],
+            'speech': ['Looking for something?'],
+        },
+        'MessageSent': {
+            'enabled': True,
+            'cooldown_seconds': 20,
+            'animations': [{'name': 'SendMail', 'weight': 100}],
+            'speech': ['Message sent.'],
+        },
+        'WaveError': {
+            'enabled': True,
+            'cooldown_seconds': 20,
+            'animations': [{'name': 'Wave', 'weight': 100}],
+            'speech': ['Something looks wrong.'],
+        },
+        'IdlePulse': {
+            'enabled': True,
+            'cooldown_seconds': 600,
+            'animations': [
+                {'name': 'LookLeft', 'weight': 20},
+                {'name': 'LookRight', 'weight': 20},
+                {'name': 'LookDown', 'weight': 20},
+                {'name': 'IdleAtom', 'weight': 20},
+                {'name': 'RestPose', 'weight': 20},
+            ],
+            'speech': [],
+        },
+        'FolderCreated': {
+            'enabled': True,
+            'cooldown_seconds': 10,
+            'animations': [{'name': 'Searching', 'weight': 50}, {'name': 'GetAttention', 'weight': 50}],
+            'speech': ['A new folder appeared.', 'You created a new folder.'],
+        },
+        'FileOpened': {
+            'enabled': True,
+            'cooldown_seconds': 15,
+            'animations': [{'name': 'Greeting', 'weight': 50}, {'name': 'Explain', 'weight': 50}],
+            'speech': ['That file was opened recently.', 'I noticed a recently opened file.'],
+        },
+    },
 }
 
-EVENT_ANIMATIONS_DEFAULT = {
-    'created_dir': ['GetAttention', 'Searching', 'Explain'],
-    'created_file': ['Writing', 'GetAttention', 'Save'],
-    'modified': ['Processing', 'Writing', 'Thinking'],
-    'deleted': ['EmptyTrash', 'GetArtsy', 'LookDown'],
-    'moved': ['Searching', 'GestureLeft', 'GestureRight'],
-    'opened': ['Greeting', 'GetAttention', 'Explain'],
-    'idle': ['Idle1_1', 'IdleAtom', 'LookUp', 'LookRight', 'RestPose'],
-}
+MANUAL_SIGNALS = [
+    'ProgramStart', 'ProgramExit', 'TypingBurst', 'CompileStarted', 'CompileFailed', 'FileSaved', 'ArchiveCreated',
+    'TrashEmptied', 'LargeDeleteInEditor', 'AudioPlayingLong', 'PrintJobStarted', 'SystemSearch', 'MessageSent', 'WaveError', 'IdlePulse',
+]
 
 
 @dataclass(slots=True)
@@ -163,37 +285,43 @@ class SoundPlayer:
         self.paplay = shutil.which('paplay')
         self.aplay = shutil.which('aplay')
         self.sounds_dir: Path | None = None
+        self.global_sounds_dir = ASSETS_DIR / 'sounds' / 'clippy'
 
     def set_agent_dir(self, sounds_dir: Path) -> None:
-        self.sounds_dir = sounds_dir
+        self.sounds_dir = sounds_dir if sounds_dir.exists() else None
 
     def play_sound_id(self, sound_id: str | int | None) -> None:
-        if sound_id is None or self.sounds_dir is None:
+        if sound_id is None:
             return
-        for ext in ('.ogg', '.oga', '.wav', '.mp3'):
-            path = self.sounds_dir / f'{sound_id}{ext}'
-            if path.exists():
-                self._spawn(path)
-                return
+        for sounds_dir in (self.sounds_dir, self.global_sounds_dir):
+            if sounds_dir is None:
+                continue
+            for ext in ('.ogg', '.oga', '.wav', '.mp3'):
+                path = sounds_dir / f'{sound_id}{ext}'
+                if path.exists():
+                    self._spawn(path)
+                    return
 
     def _spawn(self, sound_path: Path) -> None:
-        cmd = None
-        if self.paplay and sound_path.suffix.lower() in {'.ogg', '.oga', '.wav'}:
+        cmd: list[str] | None = None
+        suffix = sound_path.suffix.lower()
+        if self.paplay and suffix in {'.ogg', '.oga', '.wav'}:
             cmd = [self.paplay, str(sound_path)]
-        elif self.aplay and sound_path.suffix.lower() == '.wav':
+        elif self.aplay and suffix == '.wav':
             cmd = [self.aplay, str(sound_path)]
         elif self.canberra:
             cmd = [self.canberra, '-f', str(sound_path)]
-        if cmd:
-            try:
-                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception:
-                pass
+        if cmd is None:
+            return
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
 
 
 class AgentData:
     def __init__(self, json_path: Path, map_path: Path) -> None:
-        self.data = json.loads(json_path.read_text())
+        self.data = json.loads(json_path.read_text(encoding='utf-8'))
         self.animations: dict[str, dict[str, Any]] = self.data['animations']
         self.frame_width, self.frame_height = self.data['framesize']
         self.sprite = GdkPixbuf.Pixbuf.new_from_file(str(map_path))
@@ -288,6 +416,96 @@ class EventBridge(FileSystemEventHandler):
         self.callback('moved', getattr(event, 'dest_path', event.src_path))
 
 
+class BehaviorProfile:
+    def __init__(self, path: Path, data: dict[str, Any]) -> None:
+        self.path = path
+        self.data = data
+        self._last_signal_ts: dict[str, float] = {}
+        self._dedupe_ts: dict[str, float] = {}
+
+    @property
+    def name(self) -> str:
+        return str(self.data.get('name', self.path.stem))
+
+    @property
+    def settings(self) -> dict[str, Any]:
+        return dict(self.data.get('settings', {}))
+
+    def signal_names(self) -> list[str]:
+        return sorted(self.data.get('signals', {}).keys())
+
+    def get_signal(self, signal_name: str) -> dict[str, Any]:
+        return dict(self.data.get('signals', {}).get(signal_name, {}))
+
+    def update_signal(self, signal_name: str, new_data: dict[str, Any]) -> None:
+        self.data.setdefault('signals', {})[signal_name] = new_data
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self.data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+
+    def cooldown_for(self, signal_name: str) -> float:
+        signal = self.data.get('signals', {}).get(signal_name, {})
+        return float(signal.get('cooldown_seconds', 0))
+
+    def choose_reaction(self, signal_name: str, context: dict[str, Any] | None = None) -> tuple[str | None, str | None]:
+        context = context or {}
+        signal = self.data.get('signals', {}).get(signal_name)
+        if not signal or not signal.get('enabled', True):
+            return None, None
+
+        now = time.monotonic()
+        last_fired = self._last_signal_ts.get(signal_name, 0.0)
+        if now - last_fired < float(signal.get('cooldown_seconds', 0)):
+            return None, None
+
+        filters = signal.get('filters', {}) or {}
+        dedupe_window = float(filters.get('debounce_seconds', self.settings.get('dedupe_window_seconds', 0)))
+        dedupe_key = context.get('dedupe_key')
+        if dedupe_key and dedupe_window > 0:
+            last_seen = self._dedupe_ts.get(dedupe_key, 0.0)
+            if now - last_seen < dedupe_window:
+                return None, None
+
+        options = [opt for opt in signal.get('animations', []) if opt.get('name')]
+        if not options:
+            return None, self._choose_speech(signal)
+
+        names = [str(opt['name']) for opt in options]
+        weights = [max(int(opt.get('weight', 1)), 1) for opt in options]
+        animation = random.choices(names, weights=weights, k=1)[0]
+
+        self._last_signal_ts[signal_name] = now
+        if dedupe_key:
+            self._dedupe_ts[dedupe_key] = now
+        return animation, self._choose_speech(signal)
+
+    def _choose_speech(self, signal: dict[str, Any]) -> str | None:
+        speech_items = signal.get('speech', []) or []
+        if not speech_items:
+            return None
+        return str(random.choice(speech_items))
+
+
+class ProfileStore:
+    def __init__(self, profiles_dir: Path) -> None:
+        self.profiles_dir = profiles_dir
+        self.profiles_dir.mkdir(parents=True, exist_ok=True)
+        self.ensure_default_profile()
+
+    def ensure_default_profile(self) -> None:
+        default_path = self.profiles_dir / DEFAULT_PROFILE_FILENAME
+        if not default_path.exists():
+            default_path.write_text(json.dumps(PROFILE_TEMPLATE, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+
+    def list_profiles(self) -> list[Path]:
+        return sorted(self.profiles_dir.glob('*.json'))
+
+    def load(self, path: Path | None = None) -> BehaviorProfile:
+        profile_path = path or (self.profiles_dir / DEFAULT_PROFILE_FILENAME)
+        return BehaviorProfile(profile_path, json.loads(profile_path.read_text(encoding='utf-8')))
+
+
 class OfficeBubble(Gtk.Overlay):
     def __init__(self) -> None:
         super().__init__()
@@ -331,6 +549,7 @@ class OfficeBubble(Gtk.Overlay):
         tail_right = tail_center + self.tail_width / 2.0
         tail_tip_x = tail_center - 1.0
         tail_tip_y = y + h + self.tail_height
+
         self._bubble_path(cr, x, y, w, h, r, tail_left, tail_right, tail_tip_x, tail_tip_y)
         cr.set_source_rgb(0.937, 0.917, 0.745)
         cr.fill_preserve()
@@ -361,44 +580,42 @@ class OfficeActionsWindow(Gtk.Window):
     def __init__(self, owner: 'AssistantWindow') -> None:
         super().__init__(title='Office Assistant')
         self.owner = owner
-        self.preview_index = owner.current_agent_index
-        self.preview_agents = owner.agent_metas
-        self.preview_cache: dict[str, AgentData] = {}
-        self.set_default_size(780, 520)
+        self.gallery_index = owner.current_agent_index
+        self.set_default_size(820, 560)
         self.set_resizable(False)
-        self.set_decorated(False)
+        self.set_transient_for(owner)
+        self.set_modal(False)
         self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
-        self.connect('button-press-event', self._on_drag)
-        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        self.get_style_context().add_class('office-window')
 
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         root.set_name('office-root')
         self.add(root)
 
-        titlebar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        titlebar.set_name('title-bar')
-        titlebar.set_margin_bottom(4)
-        root.pack_start(titlebar, False, False, 0)
+        title_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        title_bar.set_name('title-bar')
+        title_bar.set_margin_bottom(10)
+        root.pack_start(title_bar, False, False, 0)
 
-        title = Gtk.Label(label='Office Assistant')
-        title.set_xalign(0.0)
-        titlebar.pack_start(title, True, True, 6)
+        title_lbl = Gtk.Label(label='Office Assistant')
+        title_lbl.set_xalign(0.0)
+        title_bar.pack_start(title_lbl, True, True, 8)
 
         help_btn = self._win95_button('?')
-        help_btn.set_size_request(28, 24)
-        help_btn.connect('clicked', lambda *_: self.owner.set_speech('Tip: pick an assistant in Gallery, then click OK.'))
-        titlebar.pack_start(help_btn, False, False, 0)
+        help_btn.set_size_request(32, 26)
+        help_btn.connect('clicked', self._on_help)
+        title_bar.pack_end(help_btn, False, False, 0)
 
         close_btn = self._win95_button('×')
-        close_btn.set_size_request(28, 24)
+        close_btn.set_size_request(32, 26)
         close_btn.connect('clicked', lambda *_: self.hide())
-        titlebar.pack_start(close_btn, False, False, 4)
+        title_bar.pack_end(close_btn, False, False, 0)
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        outer.set_margin_start(10)
-        outer.set_margin_end(10)
-        outer.set_margin_top(6)
-        outer.set_margin_bottom(10)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        outer.set_margin_start(14)
+        outer.set_margin_end(14)
+        outer.set_margin_top(0)
+        outer.set_margin_bottom(12)
         root.pack_start(outer, True, True, 0)
 
         notebook = Gtk.Notebook()
@@ -408,57 +625,117 @@ class OfficeActionsWindow(Gtk.Window):
 
         notebook.append_page(self._build_actions_page(), Gtk.Label(label='Actions'))
         notebook.append_page(self._build_gallery_page(), Gtk.Label(label='Gallery'))
+        notebook.append_page(self._build_behavior_page(), Gtk.Label(label='Behavior'))
 
         bottom = Gtk.Box(spacing=8)
         outer.pack_end(bottom, False, False, 0)
-        bottom.pack_start(Gtk.Box(), True, True, 0)
 
         ok_btn = self._win95_button('OK')
         ok_btn.set_size_request(120, 34)
         ok_btn.connect('clicked', self._on_ok)
-        bottom.pack_start(ok_btn, False, False, 0)
+        bottom.pack_end(ok_btn, False, False, 0)
 
         cancel_btn = self._win95_button('Cancel')
         cancel_btn.set_size_request(120, 34)
         cancel_btn.connect('clicked', lambda *_: self.hide())
-        bottom.pack_start(cancel_btn, False, False, 0)
+        bottom.pack_end(cancel_btn, False, False, 0)
 
-        self._refresh_gallery()
+        self._refresh_gallery_preview()
+        self._reload_animation_combo()
+        self._reload_behavior_profile_name()
+        self._reload_behavior_signal_list()
+
+    def present_for(self, transient_for: Gtk.Window) -> None:
+        self.set_transient_for(transient_for)
         self.show_all()
-        self.hide()
+        self.present()
+
+    def _win95_button(self, label: str) -> Gtk.Button:
+        btn = Gtk.Button(label=label)
+        btn.get_style_context().add_class('win95-button')
+        return btn
 
     def _build_actions_page(self) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        box.set_margin_start(10); box.set_margin_end(10); box.set_margin_top(10); box.set_margin_bottom(10)
-        desc = Gtk.Label(label='Use the buttons below to make your assistant react right away. You can also pick a specific animation.')
-        desc.set_xalign(0.0); desc.set_line_wrap(True)
+        box.set_margin_start(10)
+        box.set_margin_end(10)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
+
+        desc = Gtk.Label(label='Use the buttons below to make your assistant react right away. You can also pick a specific animation or signal.')
+        desc.set_xalign(0.0)
+        desc.set_line_wrap(True)
         box.pack_start(desc, False, False, 0)
 
-        panel = Gtk.Frame(); panel.set_name('panel-sunken'); box.pack_start(panel, True, True, 0)
+        panel = Gtk.Frame()
+        panel.set_name('panel-sunken')
+        box.pack_start(panel, True, True, 0)
+
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        inner.set_margin_start(10); inner.set_margin_end(10); inner.set_margin_top(10); inner.set_margin_bottom(10)
+        inner.set_margin_start(10)
+        inner.set_margin_end(10)
+        inner.set_margin_top(10)
+        inner.set_margin_bottom(10)
         panel.add(inner)
 
         grid = Gtk.Grid(column_spacing=10, row_spacing=10)
         inner.pack_start(grid, False, False, 0)
-        manual_actions = [('New file', 'created_file'), ('New folder', 'created_dir'), ('Modified', 'modified'), ('Deleted', 'deleted'), ('Moved', 'moved'), ('Opened', 'opened'), ('Idle', 'idle')]
-        for idx, (label, event_type) in enumerate(manual_actions):
+
+        manual_actions = [
+            ('New file', 'FileSaved'),
+            ('New folder', 'FolderCreated'),
+            ('Opened', 'FileOpened'),
+            ('Archive', 'ArchiveCreated'),
+            ('Trash', 'TrashEmptied'),
+            ('Compile', 'CompileStarted'),
+            ('Error', 'CompileFailed'),
+            ('Idle', 'IdlePulse'),
+        ]
+        for idx, (label, signal_name) in enumerate(manual_actions):
             btn = self._win95_button(label)
             btn.set_size_request(150, 34)
-            btn.connect('clicked', lambda *_args, ev=event_type: self.owner.manual_event(ev))
+            btn.connect('clicked', lambda *_args, sig=signal_name: self.owner.trigger_signal(sig, {'source': 'manual'}))
             grid.attach(btn, idx % 2, idx // 2, 1, 1)
 
-        anim_row = Gtk.Box(spacing=8); inner.pack_start(anim_row, False, False, 0)
-        self.anim_combo = Gtk.ComboBoxText(); self._reload_animation_combo(); anim_row.pack_start(self.anim_combo, True, True, 0)
-        play_btn = self._win95_button('Play'); play_btn.set_size_request(80, 32); play_btn.connect('clicked', self._on_play_animation); anim_row.pack_start(play_btn, False, False, 0)
-        rest_btn = self._win95_button('RestPose'); rest_btn.set_size_request(120, 32); rest_btn.connect('clicked', lambda *_: self.owner.play_named_animation('RestPose')); anim_row.pack_start(rest_btn, False, False, 0)
+        signal_row = Gtk.Box(spacing=8)
+        inner.pack_start(signal_row, False, False, 0)
+        self.signal_combo = Gtk.ComboBoxText()
+        for signal_name in self.owner.profile.signal_names():
+            self.signal_combo.append_text(signal_name)
+        if self.signal_combo.get_active() == -1 and self.signal_combo.get_model() is not None:
+            self.signal_combo.set_active(0)
+        signal_row.pack_start(self.signal_combo, True, True, 0)
+        fire_signal_btn = self._win95_button('Fire signal')
+        fire_signal_btn.set_size_request(120, 32)
+        fire_signal_btn.connect('clicked', self._on_fire_signal)
+        signal_row.pack_start(fire_signal_btn, False, False, 0)
+
+        anim_row = Gtk.Box(spacing=8)
+        inner.pack_start(anim_row, False, False, 0)
+        self.anim_combo = Gtk.ComboBoxText()
+        anim_row.pack_start(self.anim_combo, True, True, 0)
+
+        play_btn = self._win95_button('Play')
+        play_btn.set_size_request(80, 32)
+        play_btn.connect('clicked', self._on_play_animation)
+        anim_row.pack_start(play_btn, False, False, 0)
+
+        rest_btn = self._win95_button('RestPose')
+        rest_btn.set_size_request(120, 32)
+        rest_btn.connect('clicked', lambda *_: self.owner.play_named_animation('RestPose'))
+        anim_row.pack_start(rest_btn, False, False, 0)
         return box
 
     def _build_gallery_page(self) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        box.set_margin_start(10); box.set_margin_end(10); box.set_margin_top(10); box.set_margin_bottom(10)
+        box.set_margin_start(10)
+        box.set_margin_end(10)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
+
         desc = Gtk.Label(label='You can scroll through the different assistants by using the <Back and Next> buttons. When you are finished selecting your assistant, click the OK button.')
-        desc.set_xalign(0.0); desc.set_line_wrap(True)
+        desc.set_xalign(0.0)
+        desc.set_line_wrap(True)
         box.pack_start(desc, False, False, 0)
 
         panel = Gtk.Frame(); panel.set_name('panel-sunken'); box.pack_start(panel, True, True, 0)
@@ -481,25 +758,96 @@ class OfficeActionsWindow(Gtk.Window):
         nav.pack_start(Gtk.Box(), True, True, 0)
         return box
 
+    def _build_behavior_page(self) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.set_margin_start(10)
+        box.set_margin_end(10)
+        box.set_margin_top(10)
+        box.set_margin_bottom(10)
+
+        profile_header = Gtk.Box(spacing=8)
+        box.pack_start(profile_header, False, False, 0)
+
+        self.profile_name_entry = Gtk.Entry()
+        profile_header.pack_start(self.profile_name_entry, True, True, 0)
+
+        save_profile_btn = self._win95_button('Save profile')
+        save_profile_btn.connect('clicked', self._on_save_profile)
+        profile_header.pack_start(save_profile_btn, False, False, 0)
+
+        content = Gtk.Paned.new(Gtk.Orientation.HORIZONTAL)
+        box.pack_start(content, True, True, 0)
+
+        left_panel = Gtk.Frame(); left_panel.set_name('panel-sunken'); content.pack1(left_panel, resize=True, shrink=False)
+        left_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        left_box.set_margin_start(8); left_box.set_margin_end(8); left_box.set_margin_top(8); left_box.set_margin_bottom(8)
+        left_panel.add(left_box)
+
+        self.signal_list = Gtk.ListBox()
+        self.signal_list.connect('row-selected', self._on_signal_selected)
+        left_box.pack_start(self.signal_list, True, True, 0)
+
+        right_panel = Gtk.Frame(); right_panel.set_name('panel-sunken'); content.pack2(right_panel, resize=True, shrink=False)
+        right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        right_box.set_margin_start(8); right_box.set_margin_end(8); right_box.set_margin_top(8); right_box.set_margin_bottom(8)
+        right_panel.add(right_box)
+
+        self.signal_enabled_check = Gtk.CheckButton(label='Enabled')
+        right_box.pack_start(self.signal_enabled_check, False, False, 0)
+
+        cooldown_row = Gtk.Box(spacing=8)
+        right_box.pack_start(cooldown_row, False, False, 0)
+        cooldown_row.pack_start(Gtk.Label(label='Cooldown (s)'), False, False, 0)
+        self.cooldown_spin = Gtk.SpinButton()
+        self.cooldown_spin.set_adjustment(Gtk.Adjustment(0, 0, 9999, 1, 10, 0))
+        cooldown_row.pack_start(self.cooldown_spin, False, False, 0)
+
+        debounce_row = Gtk.Box(spacing=8)
+        right_box.pack_start(debounce_row, False, False, 0)
+        debounce_row.pack_start(Gtk.Label(label='Debounce (s)'), False, False, 0)
+        self.debounce_spin = Gtk.SpinButton()
+        self.debounce_spin.set_adjustment(Gtk.Adjustment(0, 0, 9999, 1, 10, 0))
+        debounce_row.pack_start(self.debounce_spin, False, False, 0)
+
+        self.speech_view = Gtk.TextView()
+        self.speech_view.set_wrap_mode(Gtk.WrapMode.WORD)
+        speech_sw = Gtk.ScrolledWindow()
+        speech_sw.set_size_request(-1, 120)
+        speech_sw.add(self.speech_view)
+        right_box.pack_start(Gtk.Label(label='Speech lines (one per line)', xalign=0.0), False, False, 0)
+        right_box.pack_start(speech_sw, False, False, 0)
+
+        self.animations_view = Gtk.TextView()
+        self.animations_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        anim_sw = Gtk.ScrolledWindow()
+        anim_sw.set_size_request(-1, 120)
+        anim_sw.add(self.animations_view)
+        right_box.pack_start(Gtk.Label(label='Animations: one per line as AnimationName=Weight', xalign=0.0), False, False, 0)
+        right_box.pack_start(anim_sw, False, False, 0)
+
+        signal_btn_row = Gtk.Box(spacing=8)
+        right_box.pack_start(signal_btn_row, False, False, 0)
+        apply_signal_btn = self._win95_button('Apply signal')
+        apply_signal_btn.connect('clicked', self._on_apply_signal)
+        signal_btn_row.pack_start(apply_signal_btn, False, False, 0)
+        reload_signal_btn = self._win95_button('Reload signal')
+        reload_signal_btn.connect('clicked', lambda *_: self._populate_signal_editor(self._selected_signal_name()))
+        signal_btn_row.pack_start(reload_signal_btn, False, False, 0)
+        return box
+
     def _reload_animation_combo(self) -> None:
         self.anim_combo.remove_all()
-        for name in self.owner.agent_data.list_animations():
-            self.anim_combo.append_text(name)
-        self.anim_combo.set_active(0)
+        for animation_name in self.owner.agent_data.list_animations():
+            self.anim_combo.append_text(animation_name)
+        if self.anim_combo.get_model() is not None:
+            self.anim_combo.set_active(0)
 
-    def _step_gallery(self, step: int) -> None:
-        self.preview_index = (self.preview_index + step) % len(self.preview_agents)
-        self._refresh_gallery()
-
-    def _refresh_gallery(self) -> None:
-        meta = self.preview_agents[self.preview_index]
-        data = self.preview_cache.get(meta.agent_id)
-        if data is None:
-            data = AgentData(meta.path / 'agent.json', meta.path / 'map.png')
-            self.preview_cache[meta.agent_id] = data
-        self.preview_image.set_from_pixbuf(data.get_preview_pixbuf(1.3))
+    def _refresh_gallery_preview(self) -> None:
+        meta = self.owner.agent_metas[self.gallery_index]
+        data = self.owner._load_agent_data(meta)
+        self.preview_image.set_from_pixbuf(data.get_preview_pixbuf())
         self.preview_bubble.set_text(self._gallery_quote(meta.agent_id))
-        self.preview_name.set_text(f'Name:      {meta.name}')
+        self.preview_name.set_text(f'Name:    {meta.name}')
         self.preview_desc.set_text(meta.description)
 
     def _gallery_quote(self, agent_id: str) -> str:
@@ -510,111 +858,177 @@ class OfficeActionsWindow(Gtk.Window):
             'genius': 'Let us approach this with a truly brilliant plan.',
         }.get(agent_id, 'Choose the assistant you would like to use.')
 
+    def _step_gallery(self, delta: int) -> None:
+        total = len(self.owner.agent_metas)
+        self.gallery_index = (self.gallery_index + delta) % total
+        self._refresh_gallery_preview()
+
+    def _selected_signal_name(self) -> str | None:
+        row = self.signal_list.get_selected_row()
+        if row is None:
+            return None
+        return getattr(row, 'signal_name', None)
+
+    def _reload_behavior_profile_name(self) -> None:
+        self.profile_name_entry.set_text(self.owner.profile.name)
+
+    def _reload_behavior_signal_list(self) -> None:
+        for child in list(self.signal_list.get_children()):
+            self.signal_list.remove(child)
+        for signal_name in self.owner.profile.signal_names():
+            row = Gtk.ListBoxRow()
+            row.signal_name = signal_name
+            label = Gtk.Label(label=signal_name, xalign=0.0)
+            label.set_margin_start(6)
+            label.set_margin_end(6)
+            label.set_margin_top(4)
+            label.set_margin_bottom(4)
+            row.add(label)
+            self.signal_list.add(row)
+        self.signal_list.show_all()
+        if self.signal_list.get_row_at_index(0) is not None:
+            self.signal_list.select_row(self.signal_list.get_row_at_index(0))
+
+    def _populate_signal_editor(self, signal_name: str | None) -> None:
+        if not signal_name:
+            return
+        signal = self.owner.profile.get_signal(signal_name)
+        self.signal_enabled_check.set_active(bool(signal.get('enabled', True)))
+        self.cooldown_spin.set_value(float(signal.get('cooldown_seconds', 0)))
+        filters = signal.get('filters', {}) or {}
+        self.debounce_spin.set_value(float(filters.get('debounce_seconds', 0)))
+
+        speech_buffer = self.speech_view.get_buffer()
+        speech_buffer.set_text('\n'.join(signal.get('speech', []) or []))
+
+        animation_lines = []
+        for item in signal.get('animations', []) or []:
+            name = item.get('name', '')
+            weight = item.get('weight', 1)
+            animation_lines.append(f'{name}={weight}')
+        anim_buffer = self.animations_view.get_buffer()
+        anim_buffer.set_text('\n'.join(animation_lines))
+
+    def _extract_text_view_lines(self, text_view: Gtk.TextView) -> list[str]:
+        buffer = text_view.get_buffer()
+        start = buffer.get_start_iter()
+        end = buffer.get_end_iter()
+        text = buffer.get_text(start, end, True)
+        return [line.strip() for line in text.splitlines() if line.strip()]
+
+    def _parse_animation_lines(self, lines: list[str]) -> list[dict[str, Any]]:
+        parsed: list[dict[str, Any]] = []
+        for line in lines:
+            if '=' in line:
+                name, weight = line.split('=', 1)
+                try:
+                    parsed.append({'name': name.strip(), 'weight': max(int(weight.strip()), 1)})
+                except ValueError:
+                    parsed.append({'name': name.strip(), 'weight': 1})
+            else:
+                parsed.append({'name': line.strip(), 'weight': 1})
+        return [item for item in parsed if item.get('name')]
+
+    def _on_signal_selected(self, _listbox, row: Gtk.ListBoxRow | None) -> None:
+        self._populate_signal_editor(getattr(row, 'signal_name', None) if row is not None else None)
+
+    def _on_apply_signal(self, *_args) -> None:
+        signal_name = self._selected_signal_name()
+        if not signal_name:
+            return
+        signal = self.owner.profile.get_signal(signal_name)
+        signal['enabled'] = self.signal_enabled_check.get_active()
+        signal['cooldown_seconds'] = int(self.cooldown_spin.get_value())
+        speech_lines = self._extract_text_view_lines(self.speech_view)
+        signal['speech'] = speech_lines
+        signal['animations'] = self._parse_animation_lines(self._extract_text_view_lines(self.animations_view))
+        if self.debounce_spin.get_value() > 0:
+            filters = signal.setdefault('filters', {})
+            filters['debounce_seconds'] = int(self.debounce_spin.get_value())
+        self.owner.profile.update_signal(signal_name, signal)
+        self.owner.sync_profile_settings()
+
+    def _on_save_profile(self, *_args) -> None:
+        new_name = self.profile_name_entry.get_text().strip() or self.owner.profile.name
+        self.owner.profile.data['name'] = new_name
+        self.owner.profile.save()
+        self._reload_behavior_profile_name()
+
+    def _on_help(self, *_args) -> None:
+        self.owner.set_speech('Double-click me to open this window again. The Behavior tab edits the JSON profile used by reactions.')
+
     def _on_play_animation(self, *_args) -> None:
         text = self.anim_combo.get_active_text()
         if text:
             self.owner.play_named_animation(text)
 
+    def _on_fire_signal(self, *_args) -> None:
+        signal_name = self.signal_combo.get_active_text()
+        if signal_name:
+            self.owner.trigger_signal(signal_name, {'source': 'manual'})
+
     def _on_ok(self, *_args) -> None:
-        self.owner.set_agent_by_index(self.preview_index)
+        self.owner.set_agent_by_index(self.gallery_index)
         self._reload_animation_combo()
         self.hide()
-
-    def present_for(self, owner: 'AssistantWindow') -> None:
-        self.preview_index = owner.current_agent_index
-        self._refresh_gallery()
-        self._reload_animation_combo()
-        self.show_all()
-        self.present()
-
-    def _win95_button(self, label: str) -> Gtk.Button:
-        btn = Gtk.Button(label=label)
-        btn.get_style_context().add_class('win95-button')
-        return btn
-
-    def _on_drag(self, _widget, event):
-        if event.button == 1 and event.type == Gdk.EventType.BUTTON_PRESS:
-            try:
-                self.begin_move_drag(event.button, int(event.x_root), int(event.y_root), event.time)
-            except Exception:
-                pass
-        return False
 
 
 class TrayIndicator:
     def __init__(self, owner: 'AssistantWindow') -> None:
         self.owner = owner
         self.indicator = None
-
         if AppIndicator3 is None:
-            print("[Tray] AppIndicator3 is not available")
             return
-
         try:
             icon_dir = str(ASSETS_DIR.resolve())
-            icon_name = "clippy_tray_icon"
-
-            indicator = AppIndicator3.Indicator.new(
-                "clippy-assistant",
-                icon_name,
-                AppIndicator3.IndicatorCategory.APPLICATION_STATUS,
-            )
+            icon_name = 'clippy_tray_icon-symbolic' if (ASSETS_DIR / 'clippy_tray_icon-symbolic.png').exists() else 'clippy_tray_icon'
+            indicator = AppIndicator3.Indicator.new('clippy-assistant', icon_name, AppIndicator3.IndicatorCategory.APPLICATION_STATUS)
+            indicator.set_icon_theme_path(icon_dir)
+            indicator.set_icon_full(icon_name, 'Clippy')
             indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
             indicator.set_title(APP_NAME)
-            indicator.set_icon_theme_path(icon_dir)
-            indicator.set_icon_full(icon_name, "Clippy")
-
+            indicator.set_menu(self.build_menu())
             self.indicator = indicator
-            self.indicator.set_menu(self.build_menu())
-
-        except Exception as e:
-            print(f"[Tray] failed to init indicator: {e}")
+        except Exception as exc:
+            print(f'[Tray] failed to init indicator: {exc}')
 
     def build_menu(self) -> Gtk.Menu:
         menu = Gtk.Menu()
-
-        show_item = Gtk.MenuItem(label="Show / Hide Assistant")
-        show_item.connect("activate", self._on_toggle_visibility)
+        show_item = Gtk.MenuItem(label='Show / Hide Assistant')
+        show_item.connect('activate', self._on_toggle_visibility)
         menu.append(show_item)
-
-        office_item = Gtk.MenuItem(label="Open Office Assistant")
-        office_item.connect("activate", self._on_open_actions)
+        office_item = Gtk.MenuItem(label='Open Office Assistant')
+        office_item.connect('activate', self._on_open_actions)
         menu.append(office_item)
-
-        rest_item = Gtk.MenuItem(label="RestPose")
-        rest_item.connect("activate", self._on_restpose)
+        rest_item = Gtk.MenuItem(label='RestPose')
+        rest_item.connect('activate', self._on_restpose)
         menu.append(rest_item)
-
-        sep = Gtk.SeparatorMenuItem()
-        menu.append(sep)
-
-        quit_item = Gtk.MenuItem(label="Quit")
-        quit_item.connect("activate", self._on_quit)
+        menu.append(Gtk.SeparatorMenuItem())
+        quit_item = Gtk.MenuItem(label='Quit')
+        quit_item.connect('activate', self._on_quit)
         menu.append(quit_item)
-
         menu.show_all()
         return menu
 
     def _on_toggle_visibility(self, *_args) -> None:
-        if self.owner.is_visible():
-            self.owner.hide()
-        else:
-            self.owner.show_all()
-            self.owner.present()
+        self.owner.toggle_visibility()
 
     def _on_open_actions(self, *_args) -> None:
-        self.owner.actions_window.show_all()
-        self.owner.actions_window.present()
+        self.owner.actions_window.present_for(self.owner)
 
     def _on_restpose(self, *_args) -> None:
-        self.owner.play_named_animation("RestPose")
+        self.owner.play_named_animation('RestPose')
 
     def _on_quit(self, *_args) -> None:
-        self.owner.destroy()
+        self.owner.force_quit()
+
 
 class AssistantWindow(Gtk.Window):
     def __init__(self) -> None:
         super().__init__(title=APP_NAME)
+        self.profile_store = ProfileStore(PROFILES_DIR)
+        self.profile = self.profile_store.load()
+
         self.set_default_size(420, 360)
         self.set_resizable(False)
         self.set_decorated(False)
@@ -637,35 +1051,62 @@ class AssistantWindow(Gtk.Window):
         self.connect('button-press-event', self._on_button_press)
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
 
-        self.is_hidden = False
-        self.tray = TrayIndicator(self)
-
         self.agent_metas = [AgentMeta(item['id'], item['folder'], item['name'], item['description']) for item in AGENT_LIBRARY]
         self.current_agent_index = 0
         self.agent_data = self._load_agent_data(self.agent_metas[self.current_agent_index])
-        self.sound_player = SoundPlayer(); self.sound_player.set_agent_dir(self.agent_metas[self.current_agent_index].path / 'sounds')
+        self.sound_player = SoundPlayer()
+        self.sound_player.set_agent_dir(self.agent_metas[self.current_agent_index].path / 'sounds')
         self.actions_window = OfficeActionsWindow(self)
-        self.queue: deque[tuple[str, str]] = deque()
+        self.queue: deque[tuple[str, str, dict[str, Any]]] = deque()
         self.is_busy = False
         self.last_idle = time.monotonic()
         self.last_recent_uri: str | None = None
         self.last_recent_seen = 0.0
+        self.last_global_event = 0.0
         self.observer: Observer | None = None
+        self.is_hidden = False
+        self._quit_requested = False
+        self.tray = TrayIndicator(self)
 
-        root = Gtk.Overlay(); self.add(root)
-        drag_box = Gtk.EventBox(); drag_box.set_visible_window(False); drag_box.add_events(Gdk.EventMask.BUTTON_PRESS_MASK); drag_box.connect('button-press-event', self._on_button_press); root.add(drag_box)
+        root = Gtk.Overlay()
+        self.add(root)
+        drag_box = Gtk.EventBox()
+        drag_box.set_visible_window(False)
+        drag_box.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        drag_box.connect('button-press-event', self._on_button_press)
+        root.add(drag_box)
+
         layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        layout.set_margin_top(8); layout.set_margin_bottom(8); layout.set_margin_start(8); layout.set_margin_end(8)
+        layout.set_margin_top(8)
+        layout.set_margin_bottom(8)
+        layout.set_margin_start(8)
+        layout.set_margin_end(8)
         drag_box.add(layout)
-        self.top_bubble = OfficeBubble(); self.top_bubble.set_halign(Gtk.Align.CENTER); layout.pack_start(self.top_bubble, False, False, 0)
-        self.image = Gtk.Image(); self.image.set_halign(Gtk.Align.CENTER); self.image.set_valign(Gtk.Align.CENTER); layout.pack_start(self.image, True, True, 0)
+
+        self.top_bubble = OfficeBubble()
+        self.top_bubble.set_halign(Gtk.Align.CENTER)
+        layout.pack_start(self.top_bubble, False, False, 0)
+
+        self.image = Gtk.Image()
+        self.image.set_halign(Gtk.Align.CENTER)
+        self.image.set_valign(Gtk.Align.CENTER)
+        layout.pack_start(self.image, True, True, 0)
 
         self.animator = SpriteAnimator(self.image, self._on_animation_finished, self.sound_player.play_sound_id)
         self.animator.set_agent(self.agent_data)
+
         self.show_all()
         self._set_intro_speech()
-        self._start_watchdog(); self._start_recent_monitor(); GLib.timeout_add_seconds(2, self._idle_tick)
-        self.enqueue('opened', 'Application started')
+        self.sync_profile_settings()
+        self._start_watchdog()
+        self._start_recent_monitor()
+        GLib.timeout_add_seconds(2, self._idle_tick)
+        GLib.idle_add(lambda: self.trigger_signal('ProgramStart', {'source': 'app'}))
+
+    def sync_profile_settings(self) -> None:
+        self.idle_every_seconds = float(self.profile.settings.get('idle_every_seconds', 600))
+        self.global_min_gap_seconds = float(self.profile.settings.get('global_min_gap_seconds', 12))
+        self.profile.save()
 
     def _load_agent_data(self, meta: AgentMeta) -> AgentData:
         return AgentData(meta.path / 'agent.json', meta.path / 'map.png')
@@ -676,6 +1117,7 @@ class AssistantWindow(Gtk.Window):
         self.agent_data = self._load_agent_data(meta)
         self.sound_player.set_agent_dir(meta.path / 'sounds')
         self.animator.set_agent(self.agent_data)
+        self.actions_window._reload_animation_combo()
         self.set_speech(f'{meta.name} is now ready to help you.')
 
     def set_speech(self, text: str) -> None:
@@ -685,10 +1127,33 @@ class AssistantWindow(Gtk.Window):
         self.set_speech(f'{self.agent_metas[self.current_agent_index].name} is watching your files.')
 
     def manual_event(self, event_type: str) -> None:
-        self.enqueue(event_type, f'Manual {event_type}')
+        legacy_map = {
+            'created_dir': 'FolderCreated',
+            'created_file': 'FileSaved',
+            'modified': 'FileSaved',
+            'deleted': 'TrashEmptied',
+            'moved': 'SystemSearch',
+            'opened': 'FileOpened',
+            'idle': 'IdlePulse',
+        }
+        self.trigger_signal(legacy_map.get(event_type, event_type), {'source': 'manual'})
 
     def play_named_animation(self, name: str) -> None:
-        self.queue.clear(); self.is_busy = True; self.last_idle = time.monotonic(); self.set_speech(f'Playing animation: {name}'); self.animator.set_animation(name)
+        self.queue.clear()
+        self.is_busy = True
+        self.last_idle = time.monotonic()
+        self.set_speech(f'Playing animation: {name}')
+        self.animator.set_animation(name)
+
+    def trigger_signal(self, signal_name: str, context: dict[str, Any] | None = None) -> bool:
+        context = context or {}
+        animation, speech = self.profile.choose_reaction(signal_name, context)
+        if animation is None and speech is None:
+            return False
+        payload = str(context.get('path') or context.get('display_name') or context.get('source', signal_name))
+        self.queue.append((signal_name, payload, {'animation': animation, 'speech': speech, **context}))
+        self._try_start_next()
+        return False
 
     def _on_window_draw(self, _widget, cr):
         cr.set_source_rgba(0.0, 0.0, 0.0, 0.0)
@@ -720,7 +1185,13 @@ class AssistantWindow(Gtk.Window):
             self.is_hidden = True
 
     def force_quit(self) -> None:
+        self._quit_requested = True
+        self.trigger_signal('ProgramExit', {'source': 'quit'})
+        GLib.timeout_add(250, self._finish_quit)
+
+    def _finish_quit(self) -> bool:
         self.destroy()
+        return False
 
     def _on_delete_event(self, *_args):
         self.hide()
@@ -729,7 +1200,8 @@ class AssistantWindow(Gtk.Window):
 
     def _on_destroy(self, *_args) -> None:
         if self.observer is not None:
-            self.observer.stop(); self.observer.join(timeout=2)
+            self.observer.stop()
+            self.observer.join(timeout=2)
         self.actions_window.destroy()
         Gtk.main_quit()
 
@@ -742,10 +1214,57 @@ class AssistantWindow(Gtk.Window):
         observer = Observer()
         for path in existing:
             observer.schedule(handler, str(path), recursive=True)
-        observer.daemon = True; observer.start(); self.observer = observer
+        observer.daemon = True
+        observer.start()
+        self.observer = observer
 
     def _watchdog_callback(self, event_type: str, path: str) -> None:
-        GLib.idle_add(self.enqueue, event_type, path)
+        GLib.idle_add(self._handle_fs_event, event_type, path)
+
+    def _handle_fs_event(self, event_type: str, raw_path: str) -> bool:
+        path = Path(raw_path)
+        if event_type == 'created_dir':
+            self.trigger_signal('FolderCreated', {'path': str(path), 'display_name': path.name, 'dedupe_key': f'folder:{path}'})
+            return False
+
+        if event_type in {'created_file', 'modified', 'moved'}:
+            signal_name, context = self._classify_file_event(event_type, path)
+            if signal_name:
+                self.trigger_signal(signal_name, context)
+            return False
+
+        if event_type == 'deleted':
+            if '.local/share/Trash/files' in str(path):
+                self.trigger_signal('TrashEmptied', {'path': str(path), 'display_name': path.name, 'dedupe_key': 'trash'})
+            return False
+        return False
+
+    def _classify_file_event(self, event_type: str, path: Path) -> tuple[str | None, dict[str, Any]]:
+        display_name = path.name
+        dedupe_key = f'{event_type}:{path}'
+        if self._is_archive_path(path):
+            return 'ArchiveCreated', {'path': str(path), 'display_name': display_name, 'dedupe_key': f'archive:{path.stem}'}
+
+        file_saved_signal = self.profile.get_signal('FileSaved')
+        filters = file_saved_signal.get('filters', {}) or {}
+        if self._should_ignore_saved_file(path, filters):
+            return None, {}
+        return 'FileSaved', {'path': str(path), 'display_name': display_name, 'dedupe_key': dedupe_key}
+
+    def _is_archive_path(self, path: Path) -> bool:
+        lower = path.name.lower()
+        return any(lower.endswith(ext) for ext in SUPPORTED_ARCHIVE_EXTENSIONS)
+
+    def _should_ignore_saved_file(self, path: Path, filters: dict[str, Any]) -> bool:
+        name = path.name
+        lower = name.lower()
+        if filters.get('ignore_hidden_files', True) and name.startswith('.'):
+            return True
+        if filters.get('ignore_temp_files', True):
+            patterns = list(filters.get('ignore_patterns', []))
+            if any(fnmatch.fnmatch(lower, pattern.lower()) for pattern in patterns):
+                return True
+        return False
 
     def _start_recent_monitor(self) -> None:
         self.recent_manager = Gtk.RecentManager.get_default()
@@ -766,41 +1285,47 @@ class AssistantWindow(Gtk.Window):
             return
         if self.last_recent_uri == uri and now - self.last_recent_seen < 10:
             return
-        self.last_recent_uri = uri; self.last_recent_seen = now
-        self.enqueue('opened', item.get_display_name() or uri)
-
-    def enqueue(self, event_type: str, payload: str) -> bool:
-        self.queue.append((event_type, payload)); self._try_start_next(); return False
-
-    def _available_event_animations(self, event_type: str) -> list[str]:
-        preferred = EVENT_ANIMATIONS_DEFAULT.get(event_type, ['RestPose'])
-        available = [name for name in preferred if self.agent_data.has_animation(name)]
-        return available or ['RestPose']
+        self.last_recent_uri = uri
+        self.last_recent_seen = now
+        self.trigger_signal('FileOpened', {'display_name': item.get_display_name() or uri, 'path': uri, 'dedupe_key': f'open:{uri}'})
 
     def _try_start_next(self) -> None:
         if self.is_busy or not self.queue:
             return
-        event_type, payload = self.queue.popleft()
-        anim = random.choice(self._available_event_animations(event_type))
-        message = random.choice(EVENT_MESSAGES.get(event_type, ['Something happened.']))
+        if self.global_min_gap_seconds > 0 and (time.monotonic() - self.last_global_event) < self.global_min_gap_seconds:
+            GLib.timeout_add(int(self.global_min_gap_seconds * 1000), self._continue_queue)
+            return
+        signal_name, payload, context = self.queue.popleft()
+        animation = context.get('animation') or 'RestPose'
+        speech = context.get('speech')
+        if speech is None:
+            speech = signal_name
         name = Path(payload).name if payload else payload
-        if name:
-            message = f'{message}\n{name}'
-        self.set_speech(message)
-        self.is_busy = True; self.last_idle = time.monotonic(); self.animator.set_animation(anim)
+        final_speech = speech
+        if name and name not in final_speech:
+            final_speech = f'{speech}\n{name}'
+        self.set_speech(final_speech)
+        self.is_busy = True
+        self.last_idle = time.monotonic()
+        self.last_global_event = time.monotonic()
+        self.animator.set_animation(animation)
 
     def _on_animation_finished(self, _animation_name: str) -> None:
         self.is_busy = False
         if self.agent_data.has_animation('RestPose'):
             self.animator.set_animation('RestPose')
+        if self._quit_requested and not self.queue:
+            GLib.timeout_add(80, self._finish_quit)
+            return
         GLib.timeout_add(50, self._continue_queue)
 
     def _continue_queue(self) -> bool:
-        self._try_start_next(); return False
+        self._try_start_next()
+        return False
 
     def _idle_tick(self) -> bool:
-        if not self.is_busy and not self.queue and (time.monotonic() - self.last_idle) >= IDLE_SECONDS:
-            self.enqueue('idle', '')
+        if not self.is_busy and not self.queue and (time.monotonic() - self.last_idle) >= self.idle_every_seconds:
+            self.trigger_signal('IdlePulse', {'source': 'idle'})
         return True
 
 
@@ -810,7 +1335,8 @@ def clamp_text(text: str, limit: int = 120) -> str:
 
 
 def install_css() -> None:
-    provider = Gtk.CssProvider(); provider.load_from_data(RETRO_CSS)
+    provider = Gtk.CssProvider()
+    provider.load_from_data(RETRO_CSS)
     screen = Gdk.Screen.get_default()
     if screen is not None:
         Gtk.StyleContext.add_provider_for_screen(screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)

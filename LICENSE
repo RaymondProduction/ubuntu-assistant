@@ -19,3 +19,23 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+IMPORTANT NOTICE REGARDING MICROSOFT AGENTS
+
+This software incorporates or uses code from clippy.js (or a derivative),
+which is licensed under the MIT License for the JavaScript and CSS code only.
+
+All Microsoft Office Assistant characters (Clippy / Clippit, Merlin, Rover, Links,
+and others), including their names, images, animations, and related resources,
+remain the property of Microsoft Corporation.
+
+These assets are NOT covered by the MIT License of this project or clippy.js.
+They are used here for nostalgic / non-commercial purposes only.
+
+Microsoft owns the copyright and trademark on these characters.
+No claim of ownership is made by the author of this software.
+
+For more information see the original clippy.js repository:
+https://github.com/clippyjs/clippy.js
