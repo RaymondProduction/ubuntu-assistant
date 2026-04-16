@@ -18,6 +18,12 @@ gi.require_version('Gdk', '3.0')
 gi.require_version('GdkPixbuf', '2.0')
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk
+
+try:
+    gi.require_version('AyatanaAppIndicator3', '0.1')
+    from gi.repository import AyatanaAppIndicator3 as AppIndicator3
+except (ValueError, ImportError):
+    AppIndicator3 = None
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
@@ -535,6 +541,49 @@ class OfficeActionsWindow(Gtk.Window):
         return False
 
 
+class TrayIndicator:
+    def __init__(self, owner: 'AssistantWindow') -> None:
+        self.owner = owner
+        self.indicator = None
+        if AppIndicator3 is None:
+            return
+        try:
+            self.indicator = AppIndicator3.Indicator.new(
+                'office-assistant-clone',
+                'applications-system',
+                AppIndicator3.IndicatorCategory.APPLICATION_STATUS,
+            )
+            self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
+            self.indicator.set_title(APP_NAME)
+            self.indicator.set_menu(self._build_menu())
+        except Exception:
+            self.indicator = None
+
+    def _build_menu(self) -> Gtk.Menu:
+        menu = Gtk.Menu()
+
+        toggle_item = Gtk.MenuItem(label='Show / Hide Assistant')
+        toggle_item.connect('activate', lambda *_: self.owner.toggle_visibility())
+        menu.append(toggle_item)
+
+        actions_item = Gtk.MenuItem(label='Open Office Assistant')
+        actions_item.connect('activate', lambda *_: self.owner.actions_window.present_for(self.owner))
+        menu.append(actions_item)
+
+        rest_item = Gtk.MenuItem(label='RestPose')
+        rest_item.connect('activate', lambda *_: self.owner.play_named_animation('RestPose'))
+        menu.append(rest_item)
+
+        menu.append(Gtk.SeparatorMenuItem())
+
+        quit_item = Gtk.MenuItem(label='Quit')
+        quit_item.connect('activate', lambda *_: self.owner.force_quit())
+        menu.append(quit_item)
+
+        menu.show_all()
+        return menu
+
+
 class AssistantWindow(Gtk.Window):
     def __init__(self) -> None:
         super().__init__(title=APP_NAME)
@@ -556,8 +605,12 @@ class AssistantWindow(Gtk.Window):
 
         self.connect('draw', self._on_window_draw)
         self.connect('destroy', self._on_destroy)
+        self.connect('delete-event', self._on_delete_event)
         self.connect('button-press-event', self._on_button_press)
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+
+        self.is_hidden = False
+        self.tray = TrayIndicator(self)
 
         self.agent_metas = [AgentMeta(item['id'], item['folder'], item['name'], item['description']) for item in AGENT_LIBRARY]
         self.current_agent_index = 0
@@ -628,6 +681,23 @@ class AssistantWindow(Gtk.Window):
             except Exception:
                 pass
         return False
+
+    def toggle_visibility(self) -> None:
+        if self.is_hidden or not self.get_visible():
+            self.show_all()
+            self.present()
+            self.is_hidden = False
+        else:
+            self.hide()
+            self.is_hidden = True
+
+    def force_quit(self) -> None:
+        self.destroy()
+
+    def _on_delete_event(self, *_args):
+        self.hide()
+        self.is_hidden = True
+        return True
 
     def _on_destroy(self, *_args) -> None:
         if self.observer is not None:
