@@ -156,8 +156,8 @@ PROFILE_TEMPLATE = {
         'dedupe_window_seconds': 6,
         'randomize_weighted': True,
         'typing_debounce_seconds': 2,
-        'chill_after_seconds': 30,
-        'chill_repeat_seconds': 30,
+        'chill_after_seconds': 10,
+        'chill_repeat_seconds': 10,
     },
     'fallback_idle_animations': ['LookDown', 'LookLeft', 'LookRight', 'Idle1_1', 'IdleAtom', 'RestPose'],
     'signals': {
