@@ -694,7 +694,7 @@ class OfficeActionsWindow(Gtk.Window):
         for idx, (label, signal_name) in enumerate(manual_actions):
             btn = self._win95_button(label)
             btn.set_size_request(150, 34)
-            btn.connect('clicked', lambda *_args, sig=signal_name: self.owner.trigger_signal(sig, {'source': 'manual'}))
+            btn.connect('clicked', lambda *_args, sig=signal_name: self.owner.trigger_signal(sig, {'source': 'manual', 'immediate': True}))
             grid.attach(btn, idx % 2, idx // 2, 1, 1)
 
         signal_row = Gtk.Box(spacing=8)
@@ -799,14 +799,14 @@ class OfficeActionsWindow(Gtk.Window):
         right_box.pack_start(cooldown_row, False, False, 0)
         cooldown_row.pack_start(Gtk.Label(label='Cooldown (s)'), False, False, 0)
         self.cooldown_spin = Gtk.SpinButton()
-        self.cooldown_spin.set_adjustment(Gtk.Adjustment(0, 0, 9999, 1, 10, 0))
+        self.cooldown_spin.set_adjustment(Gtk.Adjustment(value=0, lower=0, upper=9999, step_increment=1, page_increment=10, page_size=0))
         cooldown_row.pack_start(self.cooldown_spin, False, False, 0)
 
         debounce_row = Gtk.Box(spacing=8)
         right_box.pack_start(debounce_row, False, False, 0)
         debounce_row.pack_start(Gtk.Label(label='Debounce (s)'), False, False, 0)
         self.debounce_spin = Gtk.SpinButton()
-        self.debounce_spin.set_adjustment(Gtk.Adjustment(0, 0, 9999, 1, 10, 0))
+        self.debounce_spin.set_adjustment(Gtk.Adjustment(value=0, lower=0, upper=9999, step_increment=1, page_increment=10, page_size=0))
         debounce_row.pack_start(self.debounce_spin, False, False, 0)
 
         self.speech_view = Gtk.TextView()
@@ -1066,6 +1066,7 @@ class AssistantWindow(Gtk.Window):
         self.observer: Observer | None = None
         self.is_hidden = False
         self._quit_requested = False
+        self._actions_was_visible_on_hide = False
         self.tray = TrayIndicator(self)
 
         root = Gtk.Overlay()
@@ -1101,9 +1102,11 @@ class AssistantWindow(Gtk.Window):
         self._start_watchdog()
         self._start_recent_monitor()
         GLib.timeout_add_seconds(2, self._idle_tick)
-        GLib.idle_add(lambda: self.trigger_signal('ProgramStart', {'source': 'app'}))
+        GLib.idle_add(lambda: self.trigger_signal('ProgramStart', {'source': 'app', 'immediate': True}))
 
     def open_actions_window(self) -> None:
+        if self.is_hidden or not self.get_visible():
+            self.show_assistant()
         if self.actions_window is None:
             self.actions_window = OfficeActionsWindow(self)
             self.actions_window.connect('destroy', self._on_actions_window_destroy)
@@ -1153,6 +1156,10 @@ class AssistantWindow(Gtk.Window):
         self.is_busy = True
         self.last_idle = time.monotonic()
         self.set_speech(f'Playing animation: {name}')
+        try:
+            self.animator.stop()
+        except Exception:
+            pass
         self.animator.set_animation(name)
 
     def trigger_signal(self, signal_name: str, context: dict[str, Any] | None = None) -> bool:
@@ -1161,7 +1168,17 @@ class AssistantWindow(Gtk.Window):
         if animation is None and speech is None:
             return False
         payload = str(context.get('path') or context.get('display_name') or context.get('source', signal_name))
-        self.queue.append((signal_name, payload, {'animation': animation, 'speech': speech, **context}))
+        event = (signal_name, payload, {'animation': animation, 'speech': speech, **context})
+        if context.get('immediate'):
+            self.queue.clear()
+            try:
+                self.animator.stop()
+            except Exception:
+                pass
+            self.is_busy = False
+            self.queue.appendleft(event)
+        else:
+            self.queue.append(event)
         self._try_start_next()
         return False
 
@@ -1185,14 +1202,26 @@ class AssistantWindow(Gtk.Window):
                 pass
         return False
 
+    def hide_assistant(self) -> None:
+        self._actions_was_visible_on_hide = bool(self.actions_window is not None and self.actions_window.get_visible())
+        if self.actions_window is not None:
+            self.actions_window.hide()
+        self.hide()
+        self.is_hidden = True
+
+    def show_assistant(self) -> None:
+        self.show_all()
+        self.present()
+        self.is_hidden = False
+        if self.actions_window is not None and self._actions_was_visible_on_hide:
+            self.actions_window.show_all()
+            self.actions_window.present()
+
     def toggle_visibility(self) -> None:
         if self.is_hidden or not self.get_visible():
-            self.show_all()
-            self.present()
-            self.is_hidden = False
+            self.show_assistant()
         else:
-            self.destroy()
-            self.is_hidden = True
+            self.hide_assistant()
 
     def force_quit(self) -> None:
         self._quit_requested = True
@@ -1204,8 +1233,9 @@ class AssistantWindow(Gtk.Window):
         return False
 
     def _on_delete_event(self, *_args):
-        self.destroy()
-        self.is_hidden = True
+        if self._quit_requested:
+            return False
+        self.hide_assistant()
         return True
 
     def _on_destroy(self, *_args) -> None:
